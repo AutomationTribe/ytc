@@ -1,0 +1,9 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+yt-dlp
+openai-whisper
+anthropic
+openai
+python-multipart==0.0.6
+requests==2.31.0
+aiofiles==23.2.1
