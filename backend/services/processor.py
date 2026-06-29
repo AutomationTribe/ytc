@@ -6,7 +6,8 @@ from backend.services.template_service import TEMPLATES
 OUTPUT_DIR = "outputs"
 
 
-def process_clips(video_path, analysis, mode, template_id, voice_style, elevenlabs_api_key, job_id):
+def process_clips(video_path, analysis, mode, template_id, voice_style, elevenlabs_api_key, job_id,
+                  bg_clip_path=None, split_ratio=0.55):
     outputs = []
     clips = analysis.get("clips", [])
     job_out = os.path.join(OUTPUT_DIR, job_id)
@@ -26,8 +27,11 @@ def process_clips(video_path, analysis, mode, template_id, voice_style, elevenla
             if mode == "shorts":
                 create_short(video_path, start, end, src_w, src_h, out_path)
             elif mode == "template":
-                tmpl = TEMPLATES.get(template_id, TEMPLATES["split_reaction"])
-                create_template_clip(video_path, start, end, tmpl, src_w, src_h, out_path)
+                tmpl = TEMPLATES.get(template_id, TEMPLATES["gameplay_split"])
+                # Inject split_ratio into template config for compositor
+                tmpl_with_ratio = dict(tmpl, default_split_ratio=split_ratio)
+                create_template_clip(video_path, start, end, tmpl_with_ratio, src_w, src_h,
+                                     out_path, bg_clip_path=bg_clip_path)
             elif mode == "voiceover":
                 narration = clip.get("narration", clip.get("commentary", ""))
                 create_voiceover_clip(video_path, start, end, src_w, src_h, narration, voice_style, elevenlabs_api_key, out_path)
@@ -43,6 +47,7 @@ def process_clips(video_path, analysis, mode, template_id, voice_style, elevenla
                 "caption": clip.get("caption", ""),
                 "hook": clip.get("hook", ""),
                 "start": start, "end": end, "duration": dur,
+                "template_id": template_id if mode == "template" else None,
             })
 
     return outputs
@@ -68,21 +73,15 @@ def build_landscape_to_portrait_filter(src_w, src_h, out_w=1080, out_h=1920):
     Shows the FULL frame centered with a blurred zoomed version behind.
     This keeps all faces/subjects visible.
     """
-    # Foreground: fit full frame within out_w width
     fg_h = int(out_w * src_h / src_w)
     if fg_h % 2 == 1:
         fg_h += 1
 
-    # Position foreground in upper portion (faces are usually upper half)
-    overlay_y = int((out_h - fg_h) * 0.3)  # 30% from top
-
-    # Background: zoomed + blurred version
-    bg_scale_w = out_w
-    bg_scale_h = out_h
+    overlay_y = int((out_h - fg_h) * 0.3)
 
     return (
         f"split=2[bg_in][fg_in];"
-        f"[bg_in]scale={bg_scale_w}:{bg_scale_h}:force_original_aspect_ratio=increase,"
+        f"[bg_in]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
         f"crop={out_w}:{out_h},gblur=sigma=35[bg];"
         f"[fg_in]scale={out_w}:{fg_h}[fg];"
         f"[bg][fg]overlay=0:{overlay_y}"
@@ -91,7 +90,6 @@ def build_landscape_to_portrait_filter(src_w, src_h, out_w=1080, out_h=1920):
 
 def build_portrait_filter(src_w, src_h, out_w=1080, out_h=1920):
     """For PORTRAIT or SQUARE videos — simple scale + crop, already vertical."""
-    # Scale to fill, crop center
     scale_w = out_w
     scale_h = int(out_w / (src_w / src_h))
     if scale_h < out_h:
@@ -106,10 +104,8 @@ def get_vf(src_w, src_h, out_w=1080, out_h=1920):
     """Pick the right filter based on source aspect ratio."""
     ratio = src_w / src_h
     if ratio > 1.15:
-        # Landscape → use blurred background to keep faces visible
         return build_landscape_to_portrait_filter(src_w, src_h, out_w, out_h)
     else:
-        # Portrait/square → simple scale+crop works fine
         return build_portrait_filter(src_w, src_h, out_w, out_h)
 
 
@@ -134,39 +130,38 @@ def is_landscape(src_w, src_h):
 def create_short(vpath, start, end, src_w, src_h, out):
     vf = get_vf(src_w, src_h)
     if is_landscape(src_w, src_h):
-        # Landscape: use filter_complex for split/overlay pipeline
         run_ff(["-ss", str(start), "-to", str(end), "-i", vpath,
                 "-filter_complex", vf] + ENC + [out], "short")
     else:
-        # Portrait/square: simple -vf filter
         run_ff(["-ss", str(start), "-to", str(end), "-i", vpath,
                 "-vf", vf] + ENC + [out], "short")
 
 
-def create_template_clip(vpath, start, end, tmpl, src_w, src_h, out):
-    layout = tmpl.get("layout", "vertical_split")
-    if layout == "vertical_split":
-        # Top: video. Bottom: black space for text
-        if is_landscape(src_w, src_h):
-            # Fit full frame in top 60%
-            top_h = 1152  # 60% of 1920
-            fg_h = int(1080 * src_h / src_w)
-            if fg_h % 2: fg_h += 1
-            if fg_h > top_h: fg_h = top_h
-            pad_y = (top_h - fg_h) // 2
-            vf = f"scale=1080:{fg_h},pad=1080:1920:0:{pad_y}:black"
-            run_ff(["-ss", str(start), "-to", str(end), "-i", vpath,
-                    "-vf", vf] + ENC + [out], "tmpl-vsplit")
-        else:
-            vf = build_portrait_filter(src_w, src_h, 1080, 960)
-            run_ff(["-ss", str(start), "-to", str(end), "-i", vpath,
-                    "-vf", vf + ",pad=1080:1920:0:0:black"] + ENC + [out], "tmpl-vsplit")
-    elif layout == "horizontal_split":
-        vf = build_portrait_filter(src_w, src_h, 540, 1920)
-        run_ff(["-ss", str(start), "-to", str(end), "-i", vpath,
-                "-vf", vf + ",pad=1080:1920:0:0:black"] + ENC + [out], "tmpl-hsplit")
-    else:
-        create_short(vpath, start, end, src_w, src_h, out)
+def create_template_clip(vpath, start, end, tmpl, src_w, src_h, out, bg_clip_path=None):
+    """
+    Cut the user clip to a portrait 9:16, then composite with background via template_compositor.
+    """
+    from backend.services.template_compositor import composite_template
+
+    # First cut + convert to portrait
+    base = out.replace(".mp4", "_base.mp4")
+    create_short(vpath, start, end, src_w, src_h, base)
+
+    if not os.path.exists(base) or os.path.getsize(base) < 1000:
+        print(f"[proc] Base clip creation failed, skipping compositor")
+        return
+
+    # Composite
+    try:
+        composite_template(base, bg_clip_path, tmpl, out)
+    except Exception as e:
+        print(f"[proc] Compositor error: {e} — falling back to base clip")
+        os.rename(base, out)
+        return
+
+    # Clean up base clip
+    if os.path.exists(base):
+        os.remove(base)
 
 
 def create_voiceover_clip(vpath, start, end, src_w, src_h, narration, voice_style, elab_key, out):
