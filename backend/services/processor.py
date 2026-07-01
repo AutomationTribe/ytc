@@ -139,9 +139,10 @@ def create_short(vpath, start, end, src_w, src_h, out):
 
 def create_template_clip(vpath, start, end, tmpl, src_w, src_h, out, bg_clip_path=None):
     """
-    Cut the user clip to a portrait 9:16, then composite with background via template_compositor.
+    Cut the user clip to portrait 9:16, then composite with background.
+    Dispatches to the correct layout function in template_compositor.
     """
-    from backend.services.template_compositor import composite_template
+    import backend.services.template_compositor as tc
 
     # First cut + convert to portrait
     base = out.replace(".mp4", "_base.mp4")
@@ -151,9 +152,26 @@ def create_template_clip(vpath, start, end, tmpl, src_w, src_h, out, bg_clip_pat
         print(f"[proc] Base clip creation failed, skipping compositor")
         return
 
-    # Composite
+    template_id = tmpl.get("id", tmpl.get("layout", "gameplay_split"))
+    layout = tmpl.get("layout", "gameplay_split")
+    split_ratio = float(tmpl.get("default_split_ratio", 0.55))
+    bar_color = tmpl.get("bar_color", "black")
+    bg = bg_clip_path if bg_clip_path and os.path.exists(bg_clip_path) else None
+
+    print(f"[proc] Compositing layout={layout} split_ratio={split_ratio:.4f} bg={bg}")
+
     try:
-        composite_template(base, bg_clip_path, tmpl, out)
+        if layout in ("gameplay_split", "satisfying_split"):
+            tc.composite_template(base, bg, template_id, split_ratio, out)
+        elif layout == "side_by_side":
+            tc.composite_side_by_side(base, bg, split_ratio, out)
+        elif layout == "picture_in_picture":
+            pip_scale = float(tmpl.get("pip_scale", 0.30))
+            tc.composite_pip(base, bg, pip_scale, out)
+        elif layout == "caption_bar":
+            tc.composite_caption_bar(base, split_ratio, bar_color, out)
+        else:
+            tc.composite_template(base, bg, template_id, split_ratio, out)
     except Exception as e:
         print(f"[proc] Compositor error: {e} — falling back to base clip")
         os.rename(base, out)

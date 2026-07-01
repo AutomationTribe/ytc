@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --input-type=module)",
+      "Bash(host www.youtube.com)",
+      "Bash(nslookup www.youtube.com)",
+      "Bash(ping -c 2 -t 3 8.8.8.8)",
+      "Read(//private/var/run/**)",
+      "Bash(ffprobe -v quiet -print_format json -show_streams outputs/562b5dcb/full_video.mp4)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(s['width'],s['height'],s.get\\('codec_type'\\)\\) for s in d['streams']]\")",
+      "Bash(ffmpeg -y -ss 1 -i outputs/562b5dcb/full_video.mp4 -frames:v 1 /private/tmp/claude-501/-Users-dimirage-Downloads-products-ytautomation-clipforge4/19bf94ae-d011-4baf-84fd-b765dd12c26c/scratchpad/frame_check.png)",
+      "Bash(timeout 15 ffprobe -v error -show_entries format=duration -show_entries stream=width,height,codec_name -of default=noprint_wrappers=1 backgrounds/nature/rain_window.f399.mp4)",
+      "Bash(timeout 15 ffmpeg -y -i backgrounds/nature/rain_window.f399.mp4 -frames:v 1 -update 1 /private/tmp/claude-501/-Users-dimirage-Downloads-products-ytautomation-clipforge4/19bf94ae-d011-4baf-84fd-b765dd12c26c/scratchpad/bg_test.png)",
+      "Bash(ffmpeg -y -ss 1 -i /private/tmp/claude-501/-Users-dimirage-Downloads-products-ytautomation-clipforge4/19bf94ae-d011-4baf-84fd-b765dd12c26c/scratchpad/fixed_test.mp4 -frames:v 1 -update 1 /private/tmp/claude-501/-Users-dimirage-Downloads-products-ytautomation-clipforge4/19bf94ae-d011-4baf-84fd-b765dd12c26c/scratchpad/fixed_frame.png)",
+      "Bash(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 downloads/ffa1666e/video.mp4)",
+      "Bash(ffprobe -v error -show_entries stream=width,height,codec_name -of default=noprint_wrappers=1 downloads/ffa1666e/video.mp4)"
+    ]
+  }
+}

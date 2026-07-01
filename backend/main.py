@@ -1,9 +1,10 @@
-import os, uuid, asyncio, time, logging, shutil
+import os, uuid, asyncio, time, logging, shutil, subprocess, hashlib
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,6 +39,19 @@ class ProcessRequest(BaseModel):
     bg_clip_id: Optional[str] = None
     bg_category: Optional[str] = "gameplay"
     split_ratio: Optional[float] = 0.55
+    template_output_mode: Optional[str] = "shorts"  # "shorts" | "full_video"
+    output_format: Optional[str] = "portrait"        # "portrait" (1080x1920) | "landscape" (1920x1080)
+    # Watermark removal (Addendum 3)
+    watermark_enabled: Optional[bool] = False
+    watermark_regions: Optional[List[dict]] = None   # [{x, y, w, h, method, color}, ...]
+    watermark_frame_width: Optional[int] = 960        # preview frame display width
+    watermark_frame_height: Optional[int] = 540       # preview frame display height
+
+
+class FrameRequest(BaseModel):
+    job_id: Optional[str] = None       # reuse an existing download
+    youtube_url: Optional[str] = None  # fresh download (cached by URL hash)
+    timestamp: str = "5"               # "5", "3:45", "00:01:23"
 
 
 @app.get("/")
@@ -61,9 +75,7 @@ def list_backgrounds_by_category(category: str):
     if category not in valid:
         raise HTTPException(400, f"Category must be one of: {sorted(valid)}")
     from backend.services.template_compositor import get_available_backgrounds
-    data = get_available_backgrounds(category=category)
-    clips = data.get(category, [])
-    # Strip absolute path — return a URL-friendly relative path
+    clips = get_available_backgrounds(category=category)  # returns a list when category is given
     for c in clips:
         c["url"] = f"/backgrounds/{category}/{c['id']}"
     return {"category": category, "clips": clips}
@@ -107,6 +119,105 @@ def list_templates():
 
 
 # ──────────────────────────────────────────────────────────────
+# Watermark preview frame endpoint
+# ──────────────────────────────────────────────────────────────
+
+def parse_timestamp(ts: str) -> float:
+    """Parse '5', '3:45', '00:01:23' → seconds as float."""
+    ts = ts.strip()
+    if ":" in ts:
+        parts = ts.split(":")
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        elif len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+    return float(ts)
+
+
+def _find_video(dl_dir: str):
+    """Return path of first video file found in dl_dir, or None."""
+    if not os.path.isdir(dl_dir):
+        return None
+    for f in os.listdir(dl_dir):
+        if f.lower().endswith((".mp4", ".mkv", ".webm")):
+            return os.path.join(dl_dir, f)
+    return None
+
+
+def get_video_dimensions(path: str):
+    """Return (width, height) of the first video stream."""
+    import json as _json
+    r = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", path],
+        capture_output=True, text=True, timeout=30,
+    )
+    for s in _json.loads(r.stdout).get("streams", []):
+        if s.get("codec_type") == "video":
+            return int(s["width"]), int(s["height"])
+    return 1920, 1080
+
+
+@app.post("/api/preview-frame")
+def capture_frame(req: FrameRequest):
+    """
+    Extract a frame at the given timestamp.
+    Accepts either an existing job_id (video already downloaded) or a youtube_url
+    (downloads to a cache dir keyed by URL hash — reused on subsequent calls).
+    """
+    if req.job_id:
+        dl_dir = f"downloads/{req.job_id}"
+        video_path = _find_video(dl_dir)
+        if not video_path:
+            raise HTTPException(404, "Video not found for this job_id — not downloaded yet")
+        cache_key = req.job_id
+    elif req.youtube_url:
+        url_hash = hashlib.md5(req.youtube_url.encode()).hexdigest()[:8]
+        cache_key = f"preview_{url_hash}"
+        dl_dir = f"downloads/{cache_key}"
+        video_path = _find_video(dl_dir)
+        if not video_path:
+            # Download the video on demand
+            from backend.services.downloader import download_video
+            try:
+                video_path, _ = download_video(req.youtube_url, cache_key)
+            except Exception as e:
+                raise HTTPException(500, f"Download failed: {e}")
+    else:
+        raise HTTPException(400, "Provide either job_id or youtube_url")
+
+    ts = parse_timestamp(req.timestamp)
+
+    frame_dir = f"outputs/{cache_key}"
+    os.makedirs(frame_dir, exist_ok=True)
+    frame_path = f"{frame_dir}/preview_{int(ts)}s.jpg"
+
+    result = subprocess.run([
+        "ffmpeg", "-y",
+        "-ss", str(ts),
+        "-i", video_path,
+        "-vframes", "1",
+        "-q:v", "2",
+        "-vf", "scale=960:-1",
+        frame_path,
+    ], capture_output=True, text=True, timeout=30)
+
+    if result.returncode != 0 or not os.path.exists(frame_path):
+        raise HTTPException(500, f"Frame extraction failed: {result.stderr[-200:]}")
+
+    w, h = get_video_dimensions(video_path)
+    frame_h = int(960 * h / w)
+    return {
+        "frame_url": f"/outputs/{cache_key}/preview_{int(ts)}s.jpg",
+        "video_width": w,
+        "video_height": h,
+        "timestamp": ts,
+        "frame_width": 960,
+        "frame_height": frame_h,
+        "cache_key": cache_key,
+    }
+
+
+# ──────────────────────────────────────────────────────────────
 # Job processing
 # ──────────────────────────────────────────────────────────────
 
@@ -133,6 +244,34 @@ def get_job(job_id: str):
     return jobs[job_id]
 
 
+# ──────────────────────────────────────────────────────────────
+# Pipeline helpers
+# ──────────────────────────────────────────────────────────────
+
+def get_video_duration(path):
+    r = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", path],
+        capture_output=True, text=True, timeout=30,
+    )
+    try:
+        return round(float(r.stdout.strip()), 1)
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def resolve_bg_clip(bg_clip_id, bg_category):
+    if not bg_clip_id:
+        return None
+    cat = bg_category or "gameplay"
+    candidate = os.path.join("backgrounds", cat, bg_clip_id)
+    return candidate if os.path.exists(candidate) else None
+
+
+# ──────────────────────────────────────────────────────────────
+# Main pipeline
+# ──────────────────────────────────────────────────────────────
+
 async def pipeline(job_id, req):
     def up(status, pct, msg):
         jobs[job_id].update(status=status, progress=pct, message=msg)
@@ -146,54 +285,125 @@ async def pipeline(job_id, req):
             video_path, title = await asyncio.to_thread(download_video, req.youtube_url, job_id)
             logger.info(f"[{job_id}] Downloaded: {video_path}")
 
-            # 2. Transcribe
-            up("transcribing", 30, "Transcribing audio...")
-            from backend.services.transcriber import transcribe_video
-            transcript, segments = await asyncio.to_thread(transcribe_video, video_path)
-            logger.info(f"[{job_id}] Transcript: {len(segments)} segments, {len(transcript)} chars")
+            # ── LANDSCAPE / FULL VIDEO MODE ──
+            # Triggered by output_format="landscape" for template or voiceover.
+            # Skips transcription and AI entirely — applies template to the whole video.
+            output_format = req.output_format or "portrait"
+            if req.mode in ("template", "voiceover") and output_format == "landscape":
+                from backend.services.template_service import TEMPLATES
+                import backend.services.template_compositor as tc
 
-            # 3. Analyze
-            up("analyzing", 55, f"AI analyzing with {req.provider}...")
-            from backend.services.analyzer import analyze_content
-            analysis = await analyze_content(
-                transcript, segments, req.mode, req.num_shorts,
-                api_key=req.api_key or "", provider=req.provider, model=req.model,
-            )
-            raw_count = len(analysis.get("clips", []))
-            logger.info(f"[{job_id}] AI returned {raw_count} clips")
+                up("processing", 40, "Compositing full video — this takes 5-15 mins for long videos. Please wait...")
 
-            # 4. Clamp clips (NEVER drop — only shorten)
-            clips = analysis.get("clips", [])
-            for c in clips:
-                dur = c["end_time"] - c["start_time"]
-                if dur > req.max_duration:
-                    c["end_time"] = c["start_time"] + req.max_duration
-                if dur < req.min_duration:
-                    c["end_time"] = c["start_time"] + req.min_duration
-            clips = clips[:req.num_shorts]
-            analysis["clips"] = clips
-            logger.info(f"[{job_id}] After clamp: {len(clips)} clips")
+                tmpl_id = req.template_id or "gameplay_split"
+                template_config = TEMPLATES.get(tmpl_id, TEMPLATES["gameplay_split"])
+                split_ratio = float(req.split_ratio or 0.55)
+                layout = template_config.get("layout", "gameplay_split")
 
-            # 5. Resolve background clip path (for template mode)
-            bg_clip_path = None
-            if req.mode == "template" and req.bg_clip_id:
-                cat = req.bg_category or "gameplay"
-                candidate = os.path.join("backgrounds", cat, req.bg_clip_id)
-                if os.path.exists(candidate):
-                    bg_clip_path = candidate
+                bg_clip_path = resolve_bg_clip(req.bg_clip_id, req.bg_category)
+                if bg_clip_path:
                     logger.info(f"[{job_id}] Background clip: {bg_clip_path}")
-                else:
-                    logger.warning(f"[{job_id}] Background clip not found: {candidate}")
+                bg = bg_clip_path if bg_clip_path and os.path.exists(str(bg_clip_path)) else None
 
-            # 6. Process
-            up("processing", 70, f"Cutting {len(clips)} clips...")
-            from backend.services.processor import process_clips
-            outputs = await asyncio.to_thread(
-                process_clips, video_path, analysis, req.mode,
-                req.template_id, req.voice_style, req.elevenlabs_api_key, job_id,
-                bg_clip_path=bg_clip_path, split_ratio=float(req.split_ratio or 0.55),
-            )
-            logger.info(f"[{job_id}] Output: {len(outputs)} clips")
+                job_out = os.path.join("outputs", job_id)
+                os.makedirs(job_out, exist_ok=True)
+                out_path = os.path.join(job_out, "full_video.mp4")
+
+                bar_color = template_config.get("bar_color", "black")
+
+                logger.info(f"[{job_id}] layout={layout} split_ratio={split_ratio:.4f} output_format={output_format}")
+                if layout in ("gameplay_split", "satisfying_split"):
+                    await asyncio.to_thread(tc.composite_template, video_path, bg, tmpl_id, split_ratio, out_path, fast=True, output_format=output_format)
+                elif layout == "side_by_side":
+                    await asyncio.to_thread(tc.composite_side_by_side, video_path, bg, split_ratio, out_path, preset="ultrafast", crf="28", output_format=output_format)
+                elif layout == "picture_in_picture":
+                    pip_scale = float(template_config.get("pip_scale", 0.30))
+                    await asyncio.to_thread(tc.composite_pip, video_path, bg, pip_scale, out_path, preset="ultrafast", crf="28", output_format=output_format)
+                elif layout == "caption_bar":
+                    await asyncio.to_thread(tc.composite_caption_bar, video_path, split_ratio, bar_color, out_path, preset="ultrafast", crf="28", output_format=output_format)
+                else:
+                    await asyncio.to_thread(tc.composite_template, video_path, bg, tmpl_id, split_ratio, out_path, fast=True, output_format=output_format)
+
+                duration = get_video_duration(video_path)
+                outputs = [{
+                    "path": f"/outputs/{job_id}/full_video.mp4",
+                    "title": title,
+                    "caption": "",
+                    "hook": "",
+                    "start": 0, "end": duration, "duration": duration,
+                    "template_id": tmpl_id,
+                    "output_mode": "full_video",
+                    "output_format": output_format,
+                }]
+                logger.info(f"[{job_id}] Full video output: {out_path}")
+
+            # ── SHORTS MODE ──
+            else:
+                # 2. Transcribe
+                up("transcribing", 30, "Transcribing audio...")
+                from backend.services.transcriber import transcribe_video
+                transcript, segments = await asyncio.to_thread(transcribe_video, video_path)
+                logger.info(f"[{job_id}] Transcript: {len(segments)} segments, {len(transcript)} chars")
+
+                # 3. Analyze
+                up("analyzing", 55, f"AI analyzing with {req.provider}...")
+                from backend.services.analyzer import analyze_content
+                analysis = await analyze_content(
+                    transcript, segments, req.mode, req.num_shorts,
+                    api_key=req.api_key or "", provider=req.provider, model=req.model,
+                )
+                raw_count = len(analysis.get("clips", []))
+                logger.info(f"[{job_id}] AI returned {raw_count} clips")
+
+                # 4. Clamp clips
+                clips = analysis.get("clips", [])
+                for c in clips:
+                    dur = c["end_time"] - c["start_time"]
+                    if dur > req.max_duration:
+                        c["end_time"] = c["start_time"] + req.max_duration
+                    if dur < req.min_duration:
+                        c["end_time"] = c["start_time"] + req.min_duration
+                clips = clips[:req.num_shorts]
+                analysis["clips"] = clips
+                logger.info(f"[{job_id}] After clamp: {len(clips)} clips")
+
+                # 5. Resolve background clip
+                bg_clip_path = resolve_bg_clip(req.bg_clip_id, req.bg_category)
+                if bg_clip_path:
+                    logger.info(f"[{job_id}] Background clip: {bg_clip_path}")
+                elif req.mode == "template" and req.bg_clip_id:
+                    logger.warning(f"[{job_id}] Background clip not found: {req.bg_clip_id}")
+
+                # 6. Process clips
+                up("processing", 70, f"Cutting {len(clips)} clips...")
+                from backend.services.processor import process_clips
+                outputs = await asyncio.to_thread(
+                    process_clips, video_path, analysis, req.mode,
+                    req.template_id, req.voice_style, req.elevenlabs_api_key, job_id,
+                    bg_clip_path=bg_clip_path, split_ratio=float(req.split_ratio or 0.55),
+                )
+                logger.info(f"[{job_id}] Output: {len(outputs)} clips")
+
+                src_w, src_h = get_video_dimensions(video_path)
+                if req.watermark_enabled and req.watermark_regions:
+                    from backend.services.watermark_remover import apply_watermark_regions
+                    cleaned_outputs = []
+                    for clip in outputs:
+                        clip_path = clip["path"].lstrip("/")  # remove leading slash
+                        wm_out = clip_path.replace(".mp4", "_clean.mp4")
+                        ok = apply_watermark_regions(
+                            input_path=clip_path,
+                            output_path=wm_out,
+                            regions=req.watermark_regions,
+                            video_width=src_w,
+                            video_height=src_h,
+                            frame_width=req.watermark_frame_width or 960,
+                            frame_height=req.watermark_frame_height or 540,
+                        )
+                        if ok and os.path.exists(wm_out):
+                            os.replace(wm_out, clip_path)
+                        cleaned_outputs.append(clip)
+                    outputs = cleaned_outputs
 
         jobs[job_id].update(status="done", progress=100, message=f"{len(outputs)} clips ready!", outputs=outputs)
 

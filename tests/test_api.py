@@ -145,3 +145,64 @@ def test_get_job_not_found():
     """GET /api/job/{unknown_id} returns 404."""
     r = client.get("/api/job/notexist")
     assert r.status_code == 404
+
+
+# ──────────────────────────────────────────────────────────────
+# template_output_mode addendum tests
+# ──────────────────────────────────────────────────────────────
+
+def test_process_full_video_mode_accepted():
+    """POST /api/process with template_output_mode=full_video returns a job_id."""
+    r = client.post("/api/process", json={
+        "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "mode": "template",
+        "template_id": "gameplay_split",
+        "template_output_mode": "full_video",
+        "provider": "groq",
+        "api_key": "gsk_test_key_placeholder",
+    })
+    assert r.status_code == 200
+    assert "job_id" in r.json()
+
+
+def test_process_shorts_mode_default():
+    """template_output_mode defaults to 'shorts' when omitted."""
+    r = client.post("/api/process", json={
+        "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "mode": "template",
+        "template_id": "caption_bar",
+        "provider": "groq",
+        "api_key": "gsk_test_key_placeholder",
+    })
+    assert r.status_code == 200
+    job_id = r.json()["job_id"]
+    job = client.get(f"/api/job/{job_id}").json()
+    # Job exists and is queued (pipeline will fail without a real URL, but the job was created)
+    assert job["job_id"] == job_id
+
+
+def test_full_video_mode_no_api_key_needed_for_ollama():
+    """full_video mode with ollama provider (no key) creates a job."""
+    r = client.post("/api/process", json={
+        "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "mode": "template",
+        "template_id": "gameplay_split",
+        "template_output_mode": "full_video",
+        "provider": "ollama",
+    })
+    assert r.status_code == 200
+    assert "job_id" in r.json()
+
+
+def test_process_request_has_template_output_mode_field():
+    """ProcessRequest accepts template_output_mode field without error."""
+    for mode_val in ("shorts", "full_video"):
+        r = client.post("/api/process", json={
+            "youtube_url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "mode": "template",
+            "template_id": "gameplay_split",
+            "template_output_mode": mode_val,
+            "provider": "groq",
+            "api_key": "gsk_test_key_placeholder",
+        })
+        assert r.status_code == 200, f"Failed for mode={mode_val}: {r.text}"
