@@ -1413,3 +1413,354 @@ F6. Add dynamic info banner
 F7. Update settings grid to show/hide clip count based on format
 F8. Update results screen — single player for landscape, grid for portrait
 F9. Run all tests
+
+---
+
+## ADDENDUM 5: Keyword & Tag Editor (approved design)
+
+Generate SEO keywords, hashtags and platform-ready tags for each clip.
+User can edit, add, remove and copy tags directly from the results screen.
+
+---
+
+### BACKEND
+
+#### Update analyzer.py — add keyword extraction to AI prompt
+
+In `build_prompt()`, add keyword extraction to the existing shorts/template/voiceover prompts.
+Add this to the JSON response schema for ALL modes:
+
+```python
+# Add to every mode's prompt instruction:
+"""
+Also generate SEO metadata for each clip:
+- primary_keywords: 4-6 high search volume keyword phrases (2-4 words each)
+- secondary_keywords: 4-6 related/long-tail keyword phrases
+- hashtags: 6-10 hashtags for TikTok/Shorts (include # prefix)
+- youtube_tags: comma-separated string of all keywords, max 500 chars total
+- tiktok_description: caption text with inline hashtags, max 150 chars
+"""
+
+# Add to JSON schema in every mode:
+{
+  "clips": [
+    {
+      "rank": 1,
+      "start_time": 12.5,
+      "end_time": 45.0,
+      "title": "...",
+      "hook": "...",
+      "caption": "...",
+      "why": "...",
+      "primary_keywords": ["FIFA World Cup 2026", "Canada Soccer", "World Cup Goals"],
+      "secondary_keywords": ["Canada vs South Africa", "World Cup Highlights", "Football 2026"],
+      "hashtags": ["#WorldCup2026", "#FIFA", "#Canada", "#Soccer", "#Football", "#Goals"],
+      "youtube_tags": "FIFA World Cup 2026, Canada Soccer, World Cup Goals, Canada vs South Africa",
+      "tiktok_description": "Canada's stunning opener vs South Africa 🔥 #WorldCup2026 #FIFA #Canada #Soccer"
+    }
+  ]
+}
+```
+
+#### New endpoint: `POST /api/regenerate-keywords`
+
+Allow user to regenerate keywords with a different style:
+
+```python
+class KeywordRequest(BaseModel):
+    transcript_excerpt: str   # portion of transcript for this clip
+    clip_title: str
+    style: str = "seo"        # seo | viral | news | niche
+    provider: str = "groq"
+    model: Optional[str] = None
+    api_key: str
+
+@app.post("/api/regenerate-keywords")
+async def regenerate_keywords(req: KeywordRequest):
+    from backend.services.analyzer import generate_keywords
+    result = await generate_keywords(
+        req.transcript_excerpt, req.clip_title,
+        req.style, req.api_key, req.provider, req.model
+    )
+    return result
+```
+
+#### New function in analyzer.py: `generate_keywords()`
+
+```python
+async def generate_keywords(transcript: str, title: str, style: str, api_key: str, provider: str, model: str = None) -> dict:
+    style_instructions = {
+        "seo": "Focus on high search volume terms people actually search on YouTube. Prioritize evergreen keywords.",
+        "viral": "Focus on trending, emotional, and shareable terms. Use power words that drive clicks.",
+        "news": "Focus on factual, journalistic terms. Include proper nouns, event names, dates.",
+        "niche": "Focus on community-specific terms, insider language, and passionate niche audiences.",
+    }
+
+    prompt = f"""Generate SEO metadata for a video clip.
+
+Title: {title}
+Content: {transcript[:500]}
+Style: {style_instructions.get(style, style_instructions['seo'])}
+
+Return ONLY valid JSON:
+{{
+  "primary_keywords": ["phrase 1", "phrase 2", "phrase 3", "phrase 4", "phrase 5"],
+  "secondary_keywords": ["phrase 1", "phrase 2", "phrase 3", "phrase 4", "phrase 5"],
+  "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5", "#tag6", "#tag7", "#tag8"],
+  "youtube_tags": "keyword1, keyword2, keyword3, ...",
+  "tiktok_description": "Short caption with inline #hashtags max 150 chars"
+}}
+
+Rules:
+- primary_keywords: 4-6 phrases, 2-4 words each, high search volume
+- secondary_keywords: 4-6 phrases, more specific/long-tail
+- hashtags: 6-10 tags with # prefix
+- youtube_tags: all keywords comma-separated, MUST be under 500 characters total
+- tiktok_description: engaging caption with hashtags, under 150 chars
+"""
+
+    # Route to correct provider (reuse existing provider routing)
+    result = await call_provider(prompt, api_key, provider, model)
+    return parse_json_response(result)
+```
+
+#### Update outputs in pipeline
+
+Each clip in the outputs list must include keyword fields:
+
+```python
+outputs.append({
+    "path": f"/outputs/{job_id}/clip_{i+1}.mp4",
+    "title": clip.get("title", f"Clip {i+1}"),
+    "caption": clip.get("caption", ""),
+    "hook": clip.get("hook", ""),
+    "start": start,
+    "end": end,
+    "duration": dur,
+    # NEW keyword fields:
+    "primary_keywords": clip.get("primary_keywords", []),
+    "secondary_keywords": clip.get("secondary_keywords", []),
+    "hashtags": clip.get("hashtags", []),
+    "youtube_tags": clip.get("youtube_tags", ""),
+    "tiktok_description": clip.get("tiktok_description", ""),
+})
+```
+
+---
+
+### FRONTEND
+
+The frontend uses React.createElement — NO JSX.
+
+#### New state per clip
+
+Store editable keywords in state, initialized from API response:
+
+```javascript
+// Initialize when job completes
+var _clipKeywords = s({}), clipKeywords = _clipKeywords[0], setClipKeywords = _clipKeywords[1];
+
+// When job.status === "done", initialize keywords state from outputs:
+useEffect(function() {
+  if (job && job.status === "done" && job.outputs) {
+    var kw = {};
+    job.outputs.forEach(function(clip, i) {
+      kw[i] = {
+        primary: clip.primary_keywords || [],
+        secondary: clip.secondary_keywords || [],
+        hashtags: clip.hashtags || [],
+        youtube_tags: clip.youtube_tags || "",
+        tiktok_description: clip.tiktok_description || "",
+        activeTab: "keywords",
+        newTagInput: "",
+        keywordStyle: "seo",
+        regenerating: false,
+      };
+    });
+    setClipKeywords(kw);
+  }
+}, [job && job.status]);
+```
+
+#### Per-clip tab component
+
+For each clip in the results grid, add tabs below the video player and download button:
+
+**Tab bar** (3 tabs):
+```
+[📝 Caption] [🏷️ Keywords] [📤 Export]
+```
+
+**Caption tab:**
+- Editable div (contenteditable) showing the clip caption
+- Copy button
+
+**Keywords tab:**
+- Style dropdown: SEO focused / Viral / Trending / News style / Sport niche
+- Regenerate button — calls `/api/regenerate-keywords`
+- Three tag groups:
+
+Primary keywords (purple tags `#6366f1`):
+```javascript
+// Render each keyword as a pill with × button
+React.createElement("span", {
+  style: { display:"inline-flex", alignItems:"center", gap:4,
+           padding:"5px 10px", borderRadius:20, fontSize:12,
+           background:"#6366f122", border:"1px solid #6366f144", color:"#a78bfa" }
+},
+  keyword,
+  React.createElement("span", {
+    onClick: function() { removeKeyword(clipIndex, "primary", kwIndex); },
+    style: { cursor:"pointer", opacity:.6, fontSize:11 }
+  }, "×")
+)
+```
+
+Secondary keywords (grey tags):
+- Same pattern, different colors: `background:"#1e293b"`, `color:"#94a3b8"`
+
+Hashtags (blue tags):
+- Same pattern: `background:"#0284c722"`, `color:"#38bdf8"`
+
+Add tag button per group:
+- Dashed border pill `+ Add`
+- On click: show inline input
+- On Enter: add tag to state
+- On Escape: cancel
+
+Copy row at bottom:
+- "📋 Copy hashtags"
+- "📋 Copy all YouTube tags" (primary)
+
+**Export tab:**
+- YouTube tags preview box (monospace, word-break: break-all)
+- Character counter: `{youtube_tags.length} / 500 characters`
+  - Normal: grey text
+  - Over 450: amber warning
+  - Over 500: red error
+- Copy YouTube tags button
+- TikTok/Shorts description preview box
+- Copy TikTok description button
+
+#### Helper functions
+
+```javascript
+function removeKeyword(clipIdx, group, kwIdx) {
+  setClipKeywords(function(prev) {
+    var updated = Object.assign({}, prev);
+    var clip = Object.assign({}, updated[clipIdx]);
+    clip[group] = clip[group].filter(function(_, i) { return i !== kwIdx; });
+    // Rebuild youtube_tags string
+    clip.youtube_tags = [...clip.primary, ...clip.secondary].join(", ");
+    updated[clipIdx] = clip;
+    return updated;
+  });
+}
+
+function addKeyword(clipIdx, group, value) {
+  if (!value.trim()) return;
+  var val = group === "hashtags"
+    ? (value.startsWith("#") ? value : "#" + value)
+    : value;
+  setClipKeywords(function(prev) {
+    var updated = Object.assign({}, prev);
+    var clip = Object.assign({}, updated[clipIdx]);
+    clip[group] = [...clip[group], val];
+    clip.youtube_tags = [...clip.primary, ...clip.secondary].join(", ");
+    updated[clipIdx] = clip;
+    return updated;
+  });
+}
+
+function copyToClipboard(text, btn) {
+  navigator.clipboard.writeText(text).then(function() {
+    var orig = btn.textContent;
+    btn.textContent = "✓ Copied!";
+    setTimeout(function() { btn.textContent = orig; }, 1500);
+  });
+}
+
+async function regenerateKeywords(clipIdx) {
+  var clip = clipKeywords[clipIdx];
+  var output = job.outputs[clipIdx];
+  // Set regenerating state
+  setClipKeywords(function(prev) {
+    var u = Object.assign({}, prev);
+    u[clipIdx] = Object.assign({}, u[clipIdx], { regenerating: true });
+    return u;
+  });
+
+  try {
+    var res = await fetch(API + "/api/regenerate-keywords", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        transcript_excerpt: output.caption || output.title,
+        clip_title: output.title,
+        style: clip.keywordStyle,
+        provider: provider,
+        model: model || cp.models[0],
+        api_key: apiKey,
+      })
+    });
+    var data = await res.json();
+    setClipKeywords(function(prev) {
+      var u = Object.assign({}, prev);
+      u[clipIdx] = Object.assign({}, u[clipIdx], {
+        primary: data.primary_keywords || [],
+        secondary: data.secondary_keywords || [],
+        hashtags: data.hashtags || [],
+        youtube_tags: data.youtube_tags || "",
+        tiktok_description: data.tiktok_description || "",
+        regenerating: false,
+      });
+      return u;
+    });
+  } catch(e) {
+    setClipKeywords(function(prev) {
+      var u = Object.assign({}, prev);
+      u[clipIdx] = Object.assign({}, u[clipIdx], { regenerating: false });
+      return u;
+    });
+  }
+}
+```
+
+---
+
+### TESTS
+
+```python
+def test_keywords_in_analyzer_output():
+    """analyze_content returns primary_keywords, secondary_keywords, hashtags for each clip"""
+
+def test_youtube_tags_under_500_chars():
+    """youtube_tags string is always <= 500 characters"""
+
+def test_hashtags_have_hash_prefix():
+    """All hashtags start with #"""
+
+def test_regenerate_keywords_endpoint():
+    """POST /api/regenerate-keywords returns valid keyword structure"""
+
+def test_keyword_style_changes_output():
+    """seo vs viral styles produce meaningfully different keywords"""
+
+def test_keywords_in_outputs():
+    """pipeline() includes keyword fields in every output clip dict"""
+```
+
+---
+
+### IMPLEMENTATION ORDER
+
+K1. Update analyzer.py — add keyword fields to all mode prompts
+K2. Add generate_keywords() function to analyzer.py  
+K3. Add POST /api/regenerate-keywords endpoint to main.py
+K4. Update pipeline() to include keyword fields in outputs
+K5. Add clipKeywords state + initialization useEffect to App.jsx
+K6. Build keyword tab UI — tag pills with remove, add input, copy buttons
+K7. Build caption tab — editable contenteditable + copy
+K8. Build export tab — YouTube tags with char counter + TikTok description
+K9. Wire up regenerateKeywords() function with loading state
+K10. Run all keyword tests

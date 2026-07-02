@@ -48,6 +48,11 @@ def process_clips(video_path, analysis, mode, template_id, voice_style, elevenla
                 "hook": clip.get("hook", ""),
                 "start": start, "end": end, "duration": dur,
                 "template_id": template_id if mode == "template" else None,
+                "primary_keywords": clip.get("primary_keywords", []),
+                "secondary_keywords": clip.get("secondary_keywords", []),
+                "hashtags": clip.get("hashtags", []),
+                "youtube_tags": clip.get("youtube_tags", ""),
+                "tiktok_description": clip.get("tiktok_description", ""),
             })
 
     return outputs

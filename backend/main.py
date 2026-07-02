@@ -54,6 +54,15 @@ class FrameRequest(BaseModel):
     timestamp: str = "5"               # "5", "3:45", "00:01:23"
 
 
+class KeywordRequest(BaseModel):
+    transcript_excerpt: str
+    clip_title: str
+    style: str = "seo"        # seo | viral | news | niche
+    provider: str = "groq"
+    model: Optional[str] = None
+    api_key: str = ""
+
+
 @app.get("/")
 def root():
     return {"status": "ok", "version": "4.0"}
@@ -111,6 +120,16 @@ async def upload_background(category: str = "custom", file: UploadFile = File(..
 # ──────────────────────────────────────────────────────────────
 # Templates endpoint
 # ──────────────────────────────────────────────────────────────
+
+@app.post("/api/regenerate-keywords")
+async def regenerate_keywords(req: KeywordRequest):
+    from backend.services.analyzer import generate_keywords
+    result = await generate_keywords(
+        req.transcript_excerpt, req.clip_title,
+        req.style, req.api_key, req.provider, req.model
+    )
+    return result
+
 
 @app.get("/api/templates")
 def list_templates():
@@ -328,14 +347,64 @@ async def pipeline(job_id, req):
                 outputs = [{
                     "path": f"/outputs/{job_id}/full_video.mp4",
                     "title": title,
-                    "caption": "",
+                    "caption": title,
                     "hook": "",
                     "start": 0, "end": duration, "duration": duration,
                     "template_id": tmpl_id,
                     "output_mode": "full_video",
                     "output_format": output_format,
+                    "primary_keywords": [],
+                    "secondary_keywords": [],
+                    "hashtags": [],
+                    "youtube_tags": "",
+                    "tiktok_description": "",
                 }]
                 logger.info(f"[{job_id}] Full video output: {out_path}")
+
+                # Generate keywords from title (full video skips AI analysis)
+                logger.info(f"[{job_id}] API key received: '{req.api_key[:8] if req.api_key else 'EMPTY'}...' len={len(req.api_key or '')}")
+                if req.api_key or req.provider == "ollama":
+                    from backend.services.analyzer import generate_keywords
+                    try:
+                        up("processing", 90, "Generating SEO keywords...")
+                        kw = await generate_keywords(
+                            transcript=title,
+                            title=title,
+                            style="seo",
+                            api_key=req.api_key or "",
+                            provider=req.provider or "groq",
+                            model=req.model,
+                        )
+                        outputs[0].update({
+                            "primary_keywords": kw.get("primary_keywords", []),
+                            "secondary_keywords": kw.get("secondary_keywords", []),
+                            "hashtags": kw.get("hashtags", []),
+                            "youtube_tags": kw.get("youtube_tags", ""),
+                            "tiktok_description": kw.get("tiktok_description", ""),
+                        })
+                        outputs[0]["caption"] = kw.get("tiktok_description", title)
+                        logger.info(f"[{job_id}] Keywords generated: {kw.get('primary_keywords', [])[:2]}")
+                    except Exception as e:
+                        import traceback
+                        logger.error(f"[{job_id}] Keyword generation FAILED: {e}\n{traceback.format_exc()}")
+
+                # Apply watermark to full video if enabled
+                if req.watermark_enabled and req.watermark_regions:
+                    from backend.services.watermark_remover import apply_watermark_regions
+                    src_w, src_h = get_video_dimensions(video_path)
+                    wm_out = out_path.replace(".mp4", "_clean.mp4")
+                    ok = apply_watermark_regions(
+                        input_path=out_path,
+                        output_path=wm_out,
+                        regions=req.watermark_regions,
+                        video_width=src_w,
+                        video_height=src_h,
+                        frame_width=req.watermark_frame_width or 960,
+                        frame_height=req.watermark_frame_height or 540,
+                    )
+                    if ok and os.path.exists(wm_out):
+                        os.replace(wm_out, out_path)
+                        logger.info(f"[{job_id}] Watermark removed from full video")
 
             # ── SHORTS MODE ──
             else:
@@ -382,6 +451,9 @@ async def pipeline(job_id, req):
                     req.template_id, req.voice_style, req.elevenlabs_api_key, job_id,
                     bg_clip_path=bg_clip_path, split_ratio=float(req.split_ratio or 0.55),
                 )
+                for clip in outputs:
+                    clip["output_mode"] = "shorts"
+                    clip["output_format"] = req.output_format or "portrait"
                 logger.info(f"[{job_id}] Output: {len(outputs)} clips")
 
                 src_w, src_h = get_video_dimensions(video_path)
@@ -405,6 +477,8 @@ async def pipeline(job_id, req):
                         cleaned_outputs.append(clip)
                     outputs = cleaned_outputs
 
+        logger.info(f"[{job_id}] Final outputs keywords check: "
+                    f"{outputs[0].get('primary_keywords', 'MISSING') if outputs else 'NO OUTPUTS'}")
         jobs[job_id].update(status="done", progress=100, message=f"{len(outputs)} clips ready!", outputs=outputs)
 
     except Exception as e:

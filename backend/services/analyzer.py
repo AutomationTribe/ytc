@@ -94,6 +94,8 @@ For each Short, find a moment that:
 - Would make viewers stop scrolling
 - IMPORTANT: keep start_time and end_time as exact float values in seconds
 
+Also include SEO metadata for each clip: primary_keywords (4-6 high search volume phrases), secondary_keywords (4-6 long-tail phrases), hashtags (6-10 with # prefix), youtube_tags (all keywords comma-separated, max 500 chars), tiktok_description (caption with hashtags, max 150 chars).
+
 Return ONLY valid JSON, no other text, no markdown fences:
 {{
   "clips": [
@@ -104,7 +106,12 @@ Return ONLY valid JSON, no other text, no markdown fences:
       "title": "punchy title here",
       "hook": "first 3 seconds hook text",
       "caption": "viral caption with #hashtags",
-      "why": "one sentence why this works"
+      "why": "one sentence why this works",
+      "primary_keywords": ["keyword phrase 1", "keyword phrase 2", "keyword phrase 3"],
+      "secondary_keywords": ["long tail 1", "long tail 2", "long tail 3"],
+      "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5", "#tag6"],
+      "youtube_tags": "keyword phrase 1, keyword phrase 2, long tail 1",
+      "tiktok_description": "Short engaging caption with #hashtags max 150 chars"
     }}
   ]
 }}"""
@@ -118,6 +125,8 @@ TRANSCRIPT SEGMENTS:
 Find moments that are visually interesting, emotionally engaging, and 20-90 seconds long (max 120s).
 Generate a commentary script for each clip that a host would say while watching.
 
+Also include SEO metadata for each clip: primary_keywords (4-6 high search volume phrases), secondary_keywords (4-6 long-tail phrases), hashtags (6-10 with # prefix), youtube_tags (all keywords comma-separated, max 500 chars), tiktok_description (caption with hashtags, max 150 chars).
+
 Return ONLY valid JSON, no markdown fences:
 {{
   "clips": [
@@ -128,7 +137,12 @@ Return ONLY valid JSON, no markdown fences:
       "title": "clip title",
       "commentary": "what the host says while watching, 2-4 sentences",
       "caption": "caption with #hashtags",
-      "hook": "opening hook"
+      "hook": "opening hook",
+      "primary_keywords": ["keyword phrase 1", "keyword phrase 2", "keyword phrase 3"],
+      "secondary_keywords": ["long tail 1", "long tail 2", "long tail 3"],
+      "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5", "#tag6"],
+      "youtube_tags": "keyword phrase 1, keyword phrase 2, long tail 1",
+      "tiktok_description": "Short engaging caption with #hashtags max 150 chars"
     }}
   ]
 }}"""
@@ -144,6 +158,8 @@ FULL TRANSCRIPT:
 
 Create deep, authoritative narration for each clip like a documentary or news commentary.
 
+Also include SEO metadata for each clip: primary_keywords (4-6 high search volume phrases), secondary_keywords (4-6 long-tail phrases), hashtags (6-10 with # prefix), youtube_tags (all keywords comma-separated, max 500 chars), tiktok_description (caption with hashtags, max 150 chars).
+
 Return ONLY valid JSON, no markdown fences:
 {{
   "clips": [
@@ -154,7 +170,12 @@ Return ONLY valid JSON, no markdown fences:
       "title": "clip title",
       "narration": "full narration script, dramatic and engaging, 50-100 words",
       "caption": "caption with #hashtags",
-      "hook": "opening hook"
+      "hook": "opening hook",
+      "primary_keywords": ["keyword phrase 1", "keyword phrase 2", "keyword phrase 3"],
+      "secondary_keywords": ["long tail 1", "long tail 2", "long tail 3"],
+      "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5", "#tag6"],
+      "youtube_tags": "keyword phrase 1, keyword phrase 2, long tail 1",
+      "tiktok_description": "Short engaging caption with #hashtags max 150 chars"
     }}
   ]
 }}"""
@@ -185,7 +206,7 @@ async def call_anthropic(prompt: str, api_key: str, model: str) -> dict:
     client = anthropic.Anthropic(api_key=api_key)
     message = client.messages.create(
         model=model,
-        max_tokens=2000,
+        max_tokens=4000,
         messages=[{"role": "user", "content": prompt}]
     )
     return parse_json_response(message.content[0].text)
@@ -196,7 +217,7 @@ async def call_openai(prompt: str, api_key: str, model: str) -> dict:
     client = OpenAI(api_key=api_key)
     response = client.chat.completions.create(
         model=model,
-        max_tokens=2000,
+        max_tokens=4000,
         messages=[{"role": "user", "content": prompt}]
     )
     return parse_json_response(response.choices[0].message.content)
@@ -211,7 +232,7 @@ async def call_groq(prompt: str, api_key: str, model: str) -> dict:
     )
     response = client.chat.completions.create(
         model=model,
-        max_tokens=2000,
+        max_tokens=4000,
         messages=[{"role": "user", "content": prompt}]
     )
     return parse_json_response(response.choices[0].message.content)
@@ -240,3 +261,48 @@ async def call_ollama(prompt: str, model: str) -> dict:
     )
     response.raise_for_status()
     return parse_json_response(response.json()["response"])
+
+
+async def generate_keywords(transcript: str, title: str, style: str, api_key: str, provider: str, model: Optional[str] = None) -> dict:
+    style_instructions = {
+        "seo": "Focus on high search volume terms people actually search on YouTube. Prioritize evergreen keywords.",
+        "viral": "Focus on trending, emotional, and shareable terms. Use power words that drive clicks.",
+        "news": "Focus on factual, journalistic terms. Include proper nouns, event names, dates.",
+        "niche": "Focus on community-specific terms, insider language, and passionate niche audiences.",
+    }
+
+    prompt = f"""Generate SEO metadata for a video clip.
+
+Title: {title}
+Content: {transcript[:500]}
+Style: {style_instructions.get(style, style_instructions['seo'])}
+
+Return ONLY valid JSON:
+{{
+  "primary_keywords": ["phrase 1", "phrase 2", "phrase 3", "phrase 4", "phrase 5"],
+  "secondary_keywords": ["phrase 1", "phrase 2", "phrase 3", "phrase 4", "phrase 5"],
+  "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5", "#tag6", "#tag7", "#tag8"],
+  "youtube_tags": "keyword1, keyword2, keyword3, ...",
+  "tiktok_description": "Short caption with inline #hashtags max 150 chars"
+}}
+
+Rules:
+- primary_keywords: 4-6 phrases, 2-4 words each, high search volume
+- secondary_keywords: 4-6 phrases, more specific/long-tail
+- hashtags: 6-10 tags with # prefix
+- youtube_tags: all keywords comma-separated, MUST be under 500 characters total
+- tiktok_description: engaging caption with hashtags, under 150 chars
+"""
+
+    if provider == "anthropic":
+        return await call_anthropic(prompt, api_key, model or "claude-sonnet-4-6")
+    elif provider == "openai":
+        return await call_openai(prompt, api_key, model or "gpt-4o-mini")
+    elif provider == "groq":
+        return await call_groq(prompt, api_key, model or "llama-3.3-70b-versatile")
+    elif provider == "gemini":
+        return await call_gemini(prompt, api_key, model or "gemini-1.5-flash")
+    elif provider == "ollama":
+        return await call_ollama(prompt, model or "llama3.2")
+    else:
+        raise ValueError(f"Unknown provider: {provider}")

@@ -123,6 +123,9 @@ function ClipForge() {
   var _err = s(""), err = _err[0], setErr = _err[1];
   var pollRef = useRef(null);
 
+  // Keyword editor state — Addendum 5
+  var _clipKeywords = s({}), clipKeywords = _clipKeywords[0], setClipKeywords = _clipKeywords[1];
+
   // Template fields
   var _tmpl = s("gameplay_split"), tmpl = _tmpl[0], setTmpl = _tmpl[1];
   var _bgCat = s("gameplay"), bgCat = _bgCat[0], setBgCat = _bgCat[1];
@@ -268,6 +271,29 @@ function ClipForge() {
     };
   }, [wmRegions, wmFrame, wmStep]);
 
+  // Initialize keyword state when job completes — Addendum 5
+  useEffect(function() {
+    if (!job || job.status !== "done" || !job.outputs) return;
+    setClipKeywords(function(prev) {
+      var kw = {};
+      job.outputs.forEach(function(clip, i) {
+        kw[i] = prev[i] || {
+          primary: clip.primary_keywords || [],
+          secondary: clip.secondary_keywords || [],
+          hashtags: clip.hashtags || [],
+          youtube_tags: clip.youtube_tags || "",
+          tiktok_description: clip.tiktok_description || "",
+          activeTab: "keywords",
+          keywordStyle: "seo",
+          regenerating: false,
+          addingTo: null,
+          addingValue: "",
+        };
+      });
+      return kw;
+    });
+  }, [job && job.status]);
+
   function captureFrame() {
     if (!url.trim() && !jobId) { setErr("Enter a YouTube URL first"); return; }
     setWmCapturing(true);
@@ -340,6 +366,82 @@ function ClipForge() {
         setUploading(false);
       })
       .catch(function() { setUploading(false); });
+  }
+
+  // ── Keyword helper functions — Addendum 5 ──
+
+  function removeKeyword(clipIdx, group, kwIdx) {
+    setClipKeywords(function(prev) {
+      var updated = Object.assign({}, prev);
+      var clip = Object.assign({}, updated[clipIdx]);
+      clip[group] = clip[group].filter(function(_, j) { return j !== kwIdx; });
+      clip.youtube_tags = [].concat(clip.primary, clip.secondary).join(", ");
+      updated[clipIdx] = clip;
+      return updated;
+    });
+  }
+
+  function addKeyword(clipIdx, group, value) {
+    if (!value || !value.trim()) return;
+    var val = group === "hashtags" ? (value.startsWith("#") ? value : "#" + value) : value;
+    setClipKeywords(function(prev) {
+      var updated = Object.assign({}, prev);
+      var clip = Object.assign({}, updated[clipIdx]);
+      clip[group] = clip[group].concat([val]);
+      clip.youtube_tags = [].concat(clip.primary, clip.secondary).join(", ");
+      clip.addingTo = null;
+      clip.addingValue = "";
+      updated[clipIdx] = clip;
+      return updated;
+    });
+  }
+
+  function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).catch(function() {});
+  }
+
+  async function regenerateKeywords(clipIdx) {
+    var kwState = clipKeywords[clipIdx] || {};
+    var output = job && job.outputs && job.outputs[clipIdx];
+    if (!output) return;
+    setClipKeywords(function(prev) {
+      var u = Object.assign({}, prev);
+      u[clipIdx] = Object.assign({}, u[clipIdx], { regenerating: true });
+      return u;
+    });
+    try {
+      var res = await fetch(API + "/api/regenerate-keywords", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          transcript_excerpt: output.caption || output.title,
+          clip_title: output.title,
+          style: kwState.keywordStyle || "seo",
+          provider: prov,
+          model: model || cp.models[0],
+          api_key: apiKey,
+        }),
+      });
+      var data = await res.json();
+      setClipKeywords(function(prev) {
+        var u = Object.assign({}, prev);
+        u[clipIdx] = Object.assign({}, u[clipIdx], {
+          primary: data.primary_keywords || [],
+          secondary: data.secondary_keywords || [],
+          hashtags: data.hashtags || [],
+          youtube_tags: data.youtube_tags || "",
+          tiktok_description: data.tiktok_description || "",
+          regenerating: false,
+        });
+        return u;
+      });
+    } catch(e) {
+      setClipKeywords(function(prev) {
+        var u = Object.assign({}, prev);
+        u[clipIdx] = Object.assign({}, u[clipIdx], { regenerating: false });
+        return u;
+      });
+    }
   }
 
   var colors = { queued: "#6366f1", downloading: "#f59e0b", transcribing: "#3b82f6", analyzing: "#8b5cf6", processing: "#ec4899", done: "#10b981", error: "#ef4444" };
@@ -852,7 +954,140 @@ function ClipForge() {
                       "⏱️ " + job.outputs[0].duration + "s · " +
                       (job.outputs[0].output_format === "landscape" ? "1920×1080 landscape" : "1080×1920 portrait")
                     ),
-                    React.createElement("a", { href: API + job.outputs[0].path, download: true, style: Object.assign({}, btn("#6366f1"), { display: "block", textAlign: "center", color: "#fff", textDecoration: "none", fontWeight: 700 }) }, "⬇️ Download full video")
+                    React.createElement("a", { href: API + job.outputs[0].path, download: true, style: Object.assign({}, btn("#6366f1"), { display: "block", textAlign: "center", color: "#fff", textDecoration: "none", fontWeight: 700 }) }, "⬇️ Download full video"),
+
+                    // Keyword tabs for full video (index 0)
+                    React.createElement("div", { style: { marginTop: 16 } },
+                      React.createElement("div", { style: { display: "flex", borderBottom: "1px solid #1e293b", margin: "8px 0 0" } },
+                        ["📝 Caption", "🏷️ Keywords", "📤 Export"].map(function(tab, ti) {
+                          var tabKey = ["caption", "keywords", "export"][ti];
+                          var isActive = (clipKeywords[0] ? clipKeywords[0].activeTab : "keywords") === tabKey;
+                          return React.createElement("div", {
+                            key: tab,
+                            onClick: function() {
+                              setClipKeywords(function(prev) {
+                                var u = Object.assign({}, prev);
+                                u[0] = Object.assign({}, u[0] || {}, { activeTab: tabKey });
+                                return u;
+                              });
+                            },
+                            style: {
+                              padding: "8px 12px", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                              color: isActive ? "#a78bfa" : "#475569",
+                              borderBottom: isActive ? "2px solid #6366f1" : "2px solid transparent"
+                            }
+                          }, tab);
+                        })
+                      ),
+                      (function() {
+                        var kw = clipKeywords[0] || {};
+                        var activeTab = kw.activeTab || "keywords";
+                        var clip = job.outputs[0];
+
+                        if (activeTab === "caption") {
+                          return React.createElement("div", { style: { padding: "10px 0" } },
+                            React.createElement("p", {
+                              contentEditable: true,
+                              suppressContentEditableWarning: true,
+                              style: { fontSize: 12, color: "#94a3b8", lineHeight: 1.5,
+                                       background: "#0d1117", border: "1px solid #1e293b",
+                                       borderRadius: 6, padding: "8px 10px", outline: "none", minHeight: 60 }
+                            }, clip.caption),
+                            React.createElement("button", {
+                              onClick: function() { navigator.clipboard.writeText(clip.caption || ""); },
+                              style: { marginTop: 6, padding: "5px 12px", background: "#6366f133",
+                                       border: "1px solid #6366f155", borderRadius: 6,
+                                       color: "#a78bfa", fontSize: 11, cursor: "pointer" }
+                            }, "📋 Copy caption")
+                          );
+                        }
+
+                        if (activeTab === "keywords") {
+                          var primary = (kw.primary != null ? kw.primary : null) || clip.primary_keywords || [];
+                          var secondary = (kw.secondary != null ? kw.secondary : null) || clip.secondary_keywords || [];
+                          var hashtags = (kw.hashtags != null ? kw.hashtags : null) || clip.hashtags || [];
+
+                          function renderFVTags(tags, color, bg, border, group) {
+                            return React.createElement("div", { style: { marginBottom: 10 } },
+                              React.createElement("p", { style: { fontSize: 10, fontWeight: 600, color: "#475569", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 5 } },
+                                group === "primary" ? "Primary keywords" : group === "secondary" ? "Secondary keywords" : "Hashtags"
+                              ),
+                              React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 5 } },
+                                tags.map(function(tag, ti) {
+                                  return React.createElement("span", {
+                                    key: ti,
+                                    style: { display: "inline-flex", alignItems: "center", gap: 3,
+                                             padding: "4px 9px", borderRadius: 20, fontSize: 11,
+                                             background: bg, border: "1px solid " + border, color: color }
+                                  },
+                                    tag,
+                                    React.createElement("span", {
+                                      onClick: function() {
+                                        setClipKeywords(function(prev) {
+                                          var u = Object.assign({}, prev);
+                                          var c = Object.assign({}, u[0] || {});
+                                          c[group] = (c[group] || tags).filter(function(_, idx) { return idx !== ti; });
+                                          u[0] = c;
+                                          return u;
+                                        });
+                                      },
+                                      style: { cursor: "pointer", opacity: .5, fontSize: 10 }
+                                    }, "×")
+                                  );
+                                })
+                              )
+                            );
+                          }
+
+                          return React.createElement("div", { style: { padding: "10px 0" } },
+                            renderFVTags(primary, "#a78bfa", "#6366f122", "#6366f144", "primary"),
+                            renderFVTags(secondary, "#94a3b8", "#1e293b", "#334155", "secondary"),
+                            renderFVTags(hashtags, "#38bdf8", "#0284c722", "#0284c744", "hashtags"),
+                            React.createElement("button", {
+                              onClick: function() {
+                                var all = [].concat(kw.primary || primary, kw.secondary || secondary).join(", ");
+                                navigator.clipboard.writeText(all);
+                              },
+                              style: { padding: "6px 12px", background: "#6366f133", border: "1px solid #6366f155",
+                                       borderRadius: 6, color: "#a78bfa", fontSize: 11, cursor: "pointer", marginTop: 4 }
+                            }, "📋 Copy YouTube tags")
+                          );
+                        }
+
+                        if (activeTab === "export") {
+                          var ytTags = kw.youtube_tags != null ? kw.youtube_tags : (clip.youtube_tags || "");
+                          var tiktok = kw.tiktok_description != null ? kw.tiktok_description : (clip.tiktok_description || clip.caption || "");
+                          return React.createElement("div", { style: { padding: "10px 0" } },
+                            React.createElement("p", { style: { fontSize: 10, fontWeight: 600, color: "#475569", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 5 } }, "YouTube tags"),
+                            React.createElement("div", {
+                              style: { background: "#0d1117", border: "1px solid #1e293b", borderRadius: 6,
+                                       padding: "8px 10px", fontSize: 11, color: "#64748b",
+                                       fontFamily: "monospace", wordBreak: "break-all", marginBottom: 4 }
+                            }, ytTags),
+                            React.createElement("p", {
+                              style: { fontSize: 10, color: ytTags.length > 450 ? "#f59e0b" : "#475569", marginBottom: 8 }
+                            }, ytTags.length + " / 500 chars"),
+                            React.createElement("button", {
+                              onClick: function() { navigator.clipboard.writeText(ytTags); },
+                              style: { padding: "5px 12px", background: "#6366f133", border: "1px solid #6366f155",
+                                       borderRadius: 6, color: "#a78bfa", fontSize: 11, cursor: "pointer", marginBottom: 12 }
+                            }, "📋 Copy YouTube tags"),
+                            React.createElement("p", { style: { fontSize: 10, fontWeight: 600, color: "#475569", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 5 } }, "TikTok / Shorts"),
+                            React.createElement("div", {
+                              style: { background: "#0d1117", border: "1px solid #1e293b", borderRadius: 6,
+                                       padding: "8px 10px", fontSize: 11, color: "#64748b", marginBottom: 6 }
+                            }, tiktok),
+                            React.createElement("button", {
+                              onClick: function() { navigator.clipboard.writeText(tiktok); },
+                              style: { padding: "5px 12px", background: "#6366f133", border: "1px solid #6366f155",
+                                       borderRadius: 6, color: "#a78bfa", fontSize: 11, cursor: "pointer" }
+                            }, "📋 Copy TikTok description")
+                          );
+                        }
+
+                        return null;
+                      })()
+                    )
                   )
                 )
               )
@@ -861,16 +1096,240 @@ function ClipForge() {
                 React.createElement("p", { style: { color: "#10b981", fontSize: 18, fontWeight: 700, margin: "0 0 20px" } }, "✅ " + (job.outputs ? job.outputs.length : 0) + " clips ready!"),
                 job.outputs && job.outputs.map(function(clip, i) {
                   var tmplDef = clip.template_id ? TEMPLATE_DEFS.find(function(t) { return t.id === clip.template_id; }) : null;
-                  return React.createElement("div", { key: i, style: { background: "#0f172a", borderRadius: 12, overflow: "hidden", marginBottom: 16 } },
+                  var kw = clipKeywords[i] || { primary: [], secondary: [], hashtags: [], youtube_tags: "", tiktok_description: "", activeTab: "keywords", keywordStyle: "seo", regenerating: false, addingTo: null, addingValue: "" };
+                  var activeTab = kw.activeTab || "keywords";
+
+                  function setKw(updater) {
+                    setClipKeywords(function(prev) {
+                      var u = Object.assign({}, prev);
+                      u[i] = typeof updater === "function" ? updater(u[i] || kw) : updater;
+                      return u;
+                    });
+                  }
+
+                  function tagPill(kword, group, ki, bg, border, color) {
+                    return React.createElement("span", { key: ki, style: { display: "inline-flex", alignItems: "center", gap: 4, padding: "5px 10px", borderRadius: 20, fontSize: 12, background: bg, border: "1px solid " + border, color: color, margin: "0 4px 4px 0" } },
+                      kword,
+                      React.createElement("span", { onClick: function() { removeKeyword(i, group, ki); }, style: { cursor: "pointer", opacity: 0.6, fontSize: 11, marginLeft: 2 } }, "×")
+                    );
+                  }
+
+                  function addPill(group) {
+                    if (kw.addingTo === group) {
+                      return React.createElement("input", { key: "addinput-" + group, autoFocus: true, value: kw.addingValue || "", onChange: function(e) { var v = e.target.value; setKw(function(prev) { return Object.assign({}, prev, { addingValue: v }); }); }, onKeyDown: function(e) { if (e.key === "Enter") { addKeyword(i, group, kw.addingValue || ""); } if (e.key === "Escape") { setKw(function(prev) { return Object.assign({}, prev, { addingTo: null, addingValue: "" }); }); } }, style: { background: "#1e293b", border: "1px solid #374151", borderRadius: 12, padding: "4px 10px", color: "#e2e8f0", fontSize: 12, width: 120, outline: "none" } });
+                    }
+                    return React.createElement("span", { key: "addpill-" + group, onClick: function() { setKw(function(prev) { return Object.assign({}, prev, { addingTo: group, addingValue: "" }); }); }, style: { display: "inline-flex", alignItems: "center", gap: 4, padding: "5px 10px", borderRadius: 20, fontSize: 12, background: "transparent", border: "1px dashed #374151", color: "#475569", cursor: "pointer", margin: "0 4px 4px 0" } }, "+ Add");
+                  }
+
+                  return React.createElement("div", { key: i, style: S.clipCard },
                     React.createElement("video", { src: API + clip.path, controls: true, style: { width: "100%", maxHeight: 400 } }),
-                    React.createElement("div", { style: { padding: 16 } },
-                      React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 4 } },
-                        React.createElement("p", { style: { fontWeight: 700, margin: 0 } }, clip.title),
-                        tmplDef && React.createElement("span", { style: { fontSize: 11, background: "#6366f122", color: "#a5b4fc", padding: "2px 8px", borderRadius: 8, border: "1px solid #6366f144" } }, tmplDef.name)
+                    React.createElement("div", { style: S.clipMeta },
+
+                      React.createElement("p", { style: S.clipTitle }, clip.title),
+                      React.createElement("p", { style: S.clipDuration }, "⏱️ " + clip.duration + "s"),
+
+                      // TAB BAR
+                      React.createElement("div", { style: { display: "flex", borderBottom: "1px solid #1e293b", margin: "8px 0 0" } },
+                        ["📝 Caption", "🏷️ Keywords", "📤 Export"].map(function(tab, ti) {
+                          var tabKey = ["caption", "keywords", "export"][ti];
+                          var isActive = (clipKeywords[i] ? clipKeywords[i].activeTab : "keywords") === tabKey;
+                          return React.createElement("div", {
+                            key: tab,
+                            onClick: function() {
+                              setClipKeywords(function(prev) {
+                                var u = Object.assign({}, prev);
+                                u[i] = Object.assign({}, u[i] || {}, { activeTab: tabKey });
+                                return u;
+                              });
+                            },
+                            style: {
+                              padding: "8px 12px", fontSize: 11, fontWeight: 600, cursor: "pointer",
+                              color: isActive ? "#a78bfa" : "#475569",
+                              borderBottom: isActive ? "2px solid #6366f1" : "2px solid transparent"
+                            }
+                          }, tab);
+                        })
                       ),
-                      React.createElement("p", { style: { color: "#64748b", fontSize: 12, margin: "0 0 4px" } }, "⏱️ " + clip.duration + "s"),
-                      React.createElement("p", { style: { color: "#94a3b8", fontSize: 12, margin: "0 0 12px" } }, clip.caption),
-                      React.createElement("a", { href: API + clip.path, download: true, style: Object.assign({}, btn("#6366f1"), { display: "block", textAlign: "center", color: "#fff", textDecoration: "none", fontWeight: 700 }) }, "⬇️ Download")
+
+                      // TAB CONTENT (IIFE)
+                      (function() {
+                        var kw = clipKeywords[i] || {};
+                        var activeTab = kw.activeTab || "keywords";
+
+                        if (activeTab === "caption") {
+                          var captionRef = { current: null };
+                          return React.createElement("div", { style: { padding: "10px 0" } },
+                            React.createElement("p", {
+                              ref: function(el) { captionRef.current = el; },
+                              contentEditable: true,
+                              suppressContentEditableWarning: true,
+                              style: { fontSize: 13, color: "#cbd5e1", lineHeight: 1.6,
+                                       background: "#0d1117", border: "1px solid #1e293b",
+                                       borderRadius: 8, padding: "12px 14px", outline: "none",
+                                       minHeight: 72, marginBottom: 10 }
+                            }, clip.caption),
+                            React.createElement("div", { style: { display: "flex", justifyContent: "flex-end", gap: 8 } },
+                              React.createElement("button", {
+                                onClick: function() {
+                                  if (captionRef.current) captionRef.current.focus();
+                                },
+                                style: { padding: "6px 14px", background: "#1e293b",
+                                         border: "1px solid #334155", borderRadius: 6,
+                                         color: "#94a3b8", fontSize: 12, cursor: "pointer" }
+                              }, "✏️ Edit"),
+                              React.createElement("button", {
+                                onClick: function() {
+                                  var text = captionRef.current ? captionRef.current.innerText : clip.caption;
+                                  navigator.clipboard.writeText(text);
+                                },
+                                style: { padding: "6px 14px", background: "#6366f1",
+                                         border: "none", borderRadius: 6,
+                                         color: "#fff", fontSize: 12, cursor: "pointer", fontWeight: 600 }
+                              }, "📋 Copy caption")
+                            )
+                          );
+                        }
+
+                        if (activeTab === "keywords") {
+                          var primary = (kw.primary != null ? kw.primary : null) || clip.primary_keywords || [];
+                          var secondary = (kw.secondary != null ? kw.secondary : null) || clip.secondary_keywords || [];
+                          var hashtags = (kw.hashtags != null ? kw.hashtags : null) || clip.hashtags || [];
+
+                          var STYLE_OPTIONS = [
+                            { value: "seo", label: "SEO focused", icon: "🎯" },
+                            { value: "viral", label: "Viral / trending", icon: "🔥" },
+                            { value: "news", label: "News style", icon: "📰" },
+                            { value: "sport", label: "Sport niche", icon: "⚽" },
+                          ];
+                          var currentStyle = kw.keywordStyle || "seo";
+                          var currentStyleOpt = STYLE_OPTIONS.find(function(o) { return o.value === currentStyle; }) || STYLE_OPTIONS[0];
+
+                          function renderKwTags(tags, color, bg, border, group, badge) {
+                            var labelMap = { primary: "Primary keywords", secondary: "Secondary keywords", hashtags: "Hashtags" };
+                            return React.createElement("div", { style: { marginBottom: 12 } },
+                              React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 6 } },
+                                React.createElement("span", { style: { fontSize: 10, fontWeight: 700, color: "#475569", textTransform: "uppercase", letterSpacing: ".08em" } }, labelMap[group]),
+                                React.createElement("span", { style: { fontSize: 10, padding: "2px 7px", borderRadius: 10, background: "#1e293b", color: "#64748b" } }, badge)
+                              ),
+                              React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 5 } },
+                                tags.map(function(tag, ti) {
+                                  var tiCapture = ti;
+                                  return React.createElement("span", {
+                                    key: tiCapture,
+                                    style: { display: "inline-flex", alignItems: "center", gap: 3,
+                                             padding: "4px 10px", borderRadius: 20, fontSize: 12,
+                                             background: bg, border: "1px solid " + border, color: color }
+                                  },
+                                    tag,
+                                    React.createElement("span", {
+                                      onClick: function() { removeKeyword(i, group, tiCapture); },
+                                      style: { cursor: "pointer", opacity: .5, fontSize: 11, marginLeft: 2 }
+                                    }, "×")
+                                  );
+                                }),
+                                addPill(group)
+                              )
+                            );
+                          }
+
+                          return React.createElement("div", { style: { padding: "10px 0" } },
+                            // Style dropdown + Regenerate button
+                            React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 14 } },
+                              React.createElement("div", { style: { position: "relative", flex: 1 } },
+                                React.createElement("select", {
+                                  value: currentStyle,
+                                  onChange: function(e) {
+                                    var v = e.target.value;
+                                    setKw(function(prev) { return Object.assign({}, prev, { keywordStyle: v }); });
+                                  },
+                                  style: { width: "100%", padding: "8px 12px", background: "#0d1117",
+                                           border: "1px solid #1e293b", borderRadius: 8,
+                                           color: "#e2e8f0", fontSize: 13, cursor: "pointer",
+                                           appearance: "none", outline: "none" }
+                                },
+                                  STYLE_OPTIONS.map(function(opt) {
+                                    return React.createElement("option", { key: opt.value, value: opt.value },
+                                      opt.icon + " " + opt.label);
+                                  })
+                                ),
+                                React.createElement("span", {
+                                  style: { position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)",
+                                           color: "#475569", pointerEvents: "none", fontSize: 12 }
+                                }, "▾")
+                              ),
+                              React.createElement("button", {
+                                onClick: function() { regenerateKeywords(i); },
+                                disabled: kw.regenerating,
+                                style: { padding: "8px 14px", background: "#1e293b",
+                                         border: "1px solid #334155", borderRadius: 8,
+                                         color: kw.regenerating ? "#475569" : "#e2e8f0",
+                                         fontSize: 12, cursor: kw.regenerating ? "not-allowed" : "pointer",
+                                         whiteSpace: "nowrap", fontWeight: 500 }
+                              }, kw.regenerating ? "..." : "✨ Regenerate keywords")
+                            ),
+                            renderKwTags(primary, "#a78bfa", "#6366f122", "#6366f144", "primary", "high search volume"),
+                            renderKwTags(secondary, "#94a3b8", "#1e293b", "#334155", "secondary", "related terms"),
+                            renderKwTags(hashtags, "#38bdf8", "#0284c722", "#0284c744", "hashtags", "TikTok / Shorts"),
+                            React.createElement("div", { style: { display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 } },
+                              React.createElement("button", {
+                                onClick: function() {
+                                  navigator.clipboard.writeText((kw.hashtags || hashtags).join(" "));
+                                },
+                                style: { padding: "6px 14px", background: "#1e293b",
+                                         border: "1px solid #334155", borderRadius: 6,
+                                         color: "#94a3b8", fontSize: 12, cursor: "pointer" }
+                              }, "📋 Copy hashtags"),
+                              React.createElement("button", {
+                                onClick: function() {
+                                  var all = [].concat(kw.primary || primary, kw.secondary || secondary).join(", ");
+                                  navigator.clipboard.writeText(all);
+                                },
+                                style: { padding: "6px 14px", background: "#6366f1",
+                                         border: "none", borderRadius: 6,
+                                         color: "#fff", fontSize: 12, cursor: "pointer", fontWeight: 600 }
+                              }, "📋 Copy all YouTube tags")
+                            )
+                          );
+                        }
+
+                        if (activeTab === "export") {
+                          var ytTags = kw.youtube_tags != null ? kw.youtube_tags : (clip.youtube_tags || "");
+                          var tiktok = kw.tiktok_description != null ? kw.tiktok_description : (clip.tiktok_description || clip.caption || "");
+                          return React.createElement("div", { style: { padding: "10px 0" } },
+                            React.createElement("p", { style: { fontSize: 10, fontWeight: 600, color: "#475569", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 5 } }, "YouTube tags"),
+                            React.createElement("div", {
+                              style: { background: "#0d1117", border: "1px solid #1e293b", borderRadius: 6,
+                                       padding: "8px 10px", fontSize: 11, color: "#64748b",
+                                       fontFamily: "monospace", wordBreak: "break-all", marginBottom: 4 }
+                            }, ytTags),
+                            React.createElement("p", {
+                              style: { fontSize: 10, color: ytTags.length > 450 ? "#f59e0b" : "#475569", marginBottom: 8 }
+                            }, ytTags.length + " / 500 chars"),
+                            React.createElement("button", {
+                              onClick: function() { navigator.clipboard.writeText(ytTags); },
+                              style: { padding: "5px 12px", background: "#6366f133", border: "1px solid #6366f155",
+                                       borderRadius: 6, color: "#a78bfa", fontSize: 11, cursor: "pointer", marginBottom: 12 }
+                            }, "📋 Copy YouTube tags"),
+                            React.createElement("p", { style: { fontSize: 10, fontWeight: 600, color: "#475569", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 5 } }, "TikTok / Shorts"),
+                            React.createElement("div", {
+                              style: { background: "#0d1117", border: "1px solid #1e293b", borderRadius: 6,
+                                       padding: "8px 10px", fontSize: 11, color: "#64748b", marginBottom: 6 }
+                            }, tiktok),
+                            React.createElement("button", {
+                              onClick: function() { navigator.clipboard.writeText(tiktok); },
+                              style: { padding: "5px 12px", background: "#6366f133", border: "1px solid #6366f155",
+                                       borderRadius: 6, color: "#a78bfa", fontSize: 11, cursor: "pointer" }
+                            }, "📋 Copy TikTok description")
+                          );
+                        }
+
+                        return null;
+                      })(),
+
+                      // Download button at bottom
+                      React.createElement("a", {
+                        href: API + clip.path, download: true, style: S.downloadBtn
+                      }, "⬇️ Download")
                     )
                   );
                 })
@@ -888,6 +1347,13 @@ var lbl = { fontSize: 12, fontWeight: 600, color: "#94a3b8", marginBottom: 8, ma
 var inp = { width: "100%", background: "#0f172a", border: "1px solid #374151", borderRadius: 8, padding: "10px 14px", color: "#e2e8f0", fontSize: 14, outline: "none", marginBottom: 12, boxSizing: "border-box" };
 var slider = { width: "100%", accentColor: "#6366f1", display: "block" };
 function btn(bg) { return { background: bg, border: "1px solid #374151", borderRadius: 8, padding: "8px 16px", color: "#94a3b8", cursor: "pointer", fontSize: 13 }; }
+var S = {
+  clipCard: { background: "#0f172a", borderRadius: 12, overflow: "hidden", marginBottom: 16 },
+  clipMeta: { padding: 16 },
+  clipTitle: { fontWeight: 700, margin: "0 0 4px", fontSize: 14, color: "#e2e8f0" },
+  clipDuration: { color: "#64748b", fontSize: 12, margin: "0 0 0" },
+  downloadBtn: { display: "block", textAlign: "center", background: "#6366f1", border: "none", borderRadius: 8, padding: "9px 16px", color: "#fff", textDecoration: "none", fontWeight: 700, fontSize: 13, marginTop: 14, cursor: "pointer" },
+};
 
 // --- Export wrapped in error boundary ---
 export default function App() {

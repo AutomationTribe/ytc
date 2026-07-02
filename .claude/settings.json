@@ -13,7 +13,11 @@
       "Bash(timeout 15 ffmpeg -y -i backgrounds/nature/rain_window.f399.mp4 -frames:v 1 -update 1 /private/tmp/claude-501/-Users-dimirage-Downloads-products-ytautomation-clipforge4/19bf94ae-d011-4baf-84fd-b765dd12c26c/scratchpad/bg_test.png)",
       "Bash(ffmpeg -y -ss 1 -i /private/tmp/claude-501/-Users-dimirage-Downloads-products-ytautomation-clipforge4/19bf94ae-d011-4baf-84fd-b765dd12c26c/scratchpad/fixed_test.mp4 -frames:v 1 -update 1 /private/tmp/claude-501/-Users-dimirage-Downloads-products-ytautomation-clipforge4/19bf94ae-d011-4baf-84fd-b765dd12c26c/scratchpad/fixed_frame.png)",
       "Bash(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 downloads/ffa1666e/video.mp4)",
-      "Bash(ffprobe -v error -show_entries stream=width,height,codec_name -of default=noprint_wrappers=1 downloads/ffa1666e/video.mp4)"
+      "Bash(ffprobe -v error -show_entries stream=width,height,codec_name -of default=noprint_wrappers=1 downloads/ffa1666e/video.mp4)",
+      "Bash(python -c ' *)",
+      "Bash(env)",
+      "Bash(node -e \"require\\('fs'\\).readFileSync\\('src/App.jsx','utf8'\\)\")",
+      "Bash(npx --yes acorn --ecma2020 --module src/App.jsx)"
     ]
   }
 }
