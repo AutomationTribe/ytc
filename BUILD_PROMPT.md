@@ -1764,3 +1764,574 @@ K7. Build caption tab — editable contenteditable + copy
 K8. Build export tab — YouTube tags with char counter + TikTok description
 K9. Wire up regenerateKeywords() function with loading state
 K10. Run all keyword tests
+
+---
+
+## ADDENDUM 6: Cut / Remove Segments (approved design)
+
+User defines time ranges to cut out of the video before processing.
+FFmpeg concatenates the kept segments, removing the cut sections.
+Works for both full video and shorts modes.
+
+---
+
+### HOW IT WORKS
+
+```
+User defines cuts: [(60s, 105s), (225s, 262s)]
+
+FFmpeg keeps:
+  Segment 1: 0s → 60s
+  Segment 2: 105s → 225s  
+  Segment 3: 262s → end
+
+Concatenates all kept segments → single output video
+Then normal pipeline runs on the trimmed video
+```
+
+---
+
+### BACKEND
+
+#### New file: `backend/services/cutter.py`
+
+```python
+import subprocess
+import os
+import json
+
+
+def get_video_duration(path: str) -> float:
+    """Get video duration in seconds using ffprobe."""
+    result = subprocess.run([
+        "ffprobe", "-v", "quiet",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        path
+    ], capture_output=True, text=True, timeout=30)
+    try:
+        return float(result.stdout.strip())
+    except:
+        return 0.0
+
+
+def parse_timestamp(ts: str) -> float:
+    """Parse MM:SS or HH:MM:SS or raw seconds to float seconds."""
+    ts = str(ts).strip()
+    if ':' in ts:
+        parts = ts.split(':')
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        elif len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+    return float(ts)
+
+
+def apply_cuts(input_path: str, cuts: list, output_path: str) -> bool:
+    """
+    Remove specified time segments from a video.
+    
+    cuts: list of {start, end} dicts with times in seconds or MM:SS format
+    
+    Strategy:
+    1. Parse and sort all cut points
+    2. Calculate kept segments (inverse of cuts)
+    3. Extract each kept segment to a temp file
+    4. Concatenate all temp files using FFmpeg concat demuxer
+    5. Clean up temp files
+    """
+    if not cuts:
+        # No cuts — just copy the file
+        import shutil
+        shutil.copy2(input_path, output_path)
+        return True
+
+    duration = get_video_duration(input_path)
+    if duration <= 0:
+        print(f"[cutter] Could not get duration for {input_path}")
+        return False
+
+    # Parse and sort cuts
+    parsed_cuts = []
+    for cut in cuts:
+        start = parse_timestamp(cut.get("start", 0))
+        end = parse_timestamp(cut.get("end", 0))
+        if end > start and start >= 0 and end <= duration + 1:
+            parsed_cuts.append((max(0, start), min(duration, end)))
+    
+    parsed_cuts.sort(key=lambda x: x[0])
+
+    # Merge overlapping cuts
+    merged = []
+    for cut in parsed_cuts:
+        if merged and cut[0] <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], cut[1]))
+        else:
+            merged.append(list(cut))
+
+    # Calculate kept segments
+    kept = []
+    prev_end = 0.0
+    for cut_start, cut_end in merged:
+        if cut_start > prev_end:
+            kept.append((prev_end, cut_start))
+        prev_end = cut_end
+    if prev_end < duration:
+        kept.append((prev_end, duration))
+
+    if not kept:
+        print("[cutter] No segments to keep after cuts")
+        return False
+
+    print(f"[cutter] Cuts: {merged}")
+    print(f"[cutter] Keeping {len(kept)} segments: {kept}")
+
+    # If only one segment to keep, extract directly
+    if len(kept) == 1:
+        start, end = kept[0]
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(start),
+            "-to", str(end),
+            "-i", input_path,
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            output_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+        return result.returncode == 0
+
+    # Multiple segments — extract each then concatenate
+    tmp_dir = os.path.dirname(output_path)
+    tmp_files = []
+    concat_list_path = os.path.join(tmp_dir, "concat_list.txt")
+
+    try:
+        for idx, (start, end) in enumerate(kept):
+            tmp_path = os.path.join(tmp_dir, f"_seg_{idx}.mp4")
+            tmp_files.append(tmp_path)
+
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(start),
+                "-to", str(end),
+                "-i", input_path,
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-preset", "ultrafast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k",
+                "-avoid_negative_ts", "make_zero",
+                tmp_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+            if result.returncode != 0:
+                print(f"[cutter] Segment {idx} extraction failed: {result.stderr[-200:]}")
+                return False
+            print(f"[cutter] Segment {idx}: {start:.1f}s → {end:.1f}s extracted")
+
+        # Write concat list
+        with open(concat_list_path, "w") as f:
+            for tmp_path in tmp_files:
+                f.write(f"file '{os.path.abspath(tmp_path)}'\n")
+
+        # Concatenate
+        cmd_concat = [
+            "ffmpeg", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", concat_list_path,
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            output_path
+        ]
+        result = subprocess.run(cmd_concat, capture_output=True, text=True, timeout=7200)
+        if result.returncode != 0:
+            print(f"[cutter] Concat failed: {result.stderr[-300:]}")
+            return False
+
+        print(f"[cutter] Done. Output: {output_path}")
+        return True
+
+    finally:
+        # Clean up temp files
+        for f in tmp_files:
+            if os.path.exists(f):
+                os.remove(f)
+        if os.path.exists(concat_list_path):
+            os.remove(concat_list_path)
+```
+
+#### Update `ProcessRequest` in `main.py`
+
+```python
+# Cut segments
+cut_enabled: Optional[bool] = False
+cut_segments: Optional[list] = None  # [{start: "01:00", end: "01:45"}, ...]
+```
+
+#### Update pipeline in `main.py`
+
+Add cut step IMMEDIATELY AFTER download, BEFORE any other processing:
+
+```python
+# STEP 1: Download
+up("downloading", 10, "Downloading video...")
+from backend.services.downloader import download_video
+video_path, title = await asyncio.to_thread(download_video, req.youtube_url, job_id)
+
+# STEP 1b: Apply cuts if enabled (before transcription/templates)
+if req.cut_enabled and req.cut_segments:
+    up("processing", 15, f"Removing {len(req.cut_segments)} segment(s)...")
+    from backend.services.cutter import apply_cuts
+    cut_output = video_path.replace(".mp4", "_cut.mp4")
+    success = await asyncio.to_thread(
+        apply_cuts, video_path, req.cut_segments, cut_output
+    )
+    if success and os.path.exists(cut_output):
+        os.replace(cut_output, video_path)  # replace source with cut version
+        logger.info(f"[{job_id}] Cuts applied. New file: {video_path}")
+    else:
+        logger.warning(f"[{job_id}] Cut failed — continuing with original")
+
+# STEP 2: Transcribe / template / etc (existing code unchanged)
+```
+
+---
+
+### FRONTEND
+
+#### New state variables
+
+```javascript
+var _cutEnabled = s(false), cutEnabled = _cutEnabled[0], setCutEnabled = _cutEnabled[1];
+var _cutSegments = s([]), cutSegments = _cutSegments[0], setCutSegments = _cutSegments[1];
+var _videoDuration = s(0), videoDuration = _videoDuration[0], setVideoDuration = _videoDuration[1];
+```
+
+#### Add to request body in submit()
+
+```javascript
+cut_enabled: cutEnabled && cutSegments.length > 0,
+cut_segments: cutSegments.map(function(c) {
+  return { start: c.start, end: c.end };
+}),
+```
+
+#### Helper functions
+
+```javascript
+function addCutSegment() {
+  setCutSegments(function(prev) {
+    return prev.concat([{ id: Date.now(), start: "00:00", end: "00:30" }]);
+  });
+}
+
+function removeCutSegment(id) {
+  setCutSegments(function(prev) {
+    return prev.filter(function(c) { return c.id !== id; });
+  });
+}
+
+function updateCutSegment(id, field, value) {
+  setCutSegments(function(prev) {
+    return prev.map(function(c) {
+      return c.id === id ? Object.assign({}, c, { [field]: value }) : c;
+    });
+  });
+}
+
+function parseTs(ts) {
+  // Parse MM:SS or HH:MM:SS to seconds for display calculations
+  var parts = String(ts).split(':').map(Number);
+  if (parts.length === 3) return parts[0]*3600 + parts[1]*60 + parts[2];
+  if (parts.length === 2) return parts[0]*60 + parts[1];
+  return Number(ts) || 0;
+}
+
+function formatDur(secs) {
+  var s = Math.round(Math.abs(secs));
+  var m = Math.floor(s / 60);
+  var h = Math.floor(m / 60);
+  if (h > 0) return h + ':' + String(m%60).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
+  return m + ':' + String(s%60).padStart(2,'0');
+}
+```
+
+#### Cut section UI
+
+Place this card in the form section, AFTER the watermark card.
+Same toggle pattern as watermark:
+
+```
+┌─────────────────────────────────────────────────────┐
+│ ✂️ Cut / Remove Segments          [toggle switch]    │
+│ Define time ranges to remove from video              │
+├─────────────────────────────────────────────────────┤  ← only when toggled on
+│                                                      │
+│ TIMELINE PREVIEW                                     │
+│ [====keep====|//cut//|====keep====|//cut//|==keep==] │
+│ 0:00        1:00       2:00       3:00         5:05  │
+│                                                      │
+│ Remove from [01:00] to [01:45]  -45s  [× Remove]   │
+│ Remove from [03:45] to [04:22]  -37s  [× Remove]   │
+│                                                      │
+│ [✂️ + Add another cut]                              │
+│                                                      │
+│ Original: 5:05  →  Removed: -1:22  =  Final: 3:43  │
+└─────────────────────────────────────────────────────┘
+```
+
+Full React.createElement implementation:
+
+```javascript
+React.createElement("div", { style: card },
+
+  // Header + toggle
+  React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
+    React.createElement("div", null,
+      React.createElement("p", { style: Object.assign({}, lbl, { marginBottom: 2 }) }, "✂️ Cut / Remove Segments"),
+      React.createElement("p", { style: { margin: 0, fontSize: 12, color: "#475569" } },
+        cutEnabled ? "Define time ranges to remove from the video" : "Toggle on to remove sections from the video"
+      )
+    ),
+    React.createElement("div", {
+      onClick: function() { setCutEnabled(!cutEnabled); },
+      style: { width: 44, height: 24, borderRadius: 12, cursor: "pointer",
+               background: cutEnabled ? "#6366f1" : "#374151",
+               position: "relative", transition: "background 0.2s", flexShrink: 0 }
+    },
+      React.createElement("div", {
+        style: { position: "absolute", top: 3,
+                 left: cutEnabled ? 23 : 3,
+                 width: 18, height: 18, borderRadius: "50%",
+                 background: "#fff", transition: "left 0.2s" }
+      })
+    )
+  ),
+
+  // Expanded section
+  cutEnabled && React.createElement("div", { style: { marginTop: 16 } },
+
+    // Timeline bar
+    React.createElement("div", { style: { marginBottom: 16 } },
+      React.createElement("p", { style: lbl }, "Timeline preview"),
+      React.createElement("div", { style: { position: "relative", height: 40, background: "#0f172a",
+                                             border: "1px solid #1e293b", borderRadius: 8, overflow: "hidden" } },
+        // Render kept and cut segments as colored blocks
+        // Use videoDuration to calculate percentages
+        // kept segments = blue/green, cut segments = red
+        (function() {
+          if (!videoDuration || cutSegments.length === 0) {
+            return React.createElement("div", { style: { height: "100%", background: "#6366f122",
+                                                          borderLeft: "2px solid #6366f1",
+                                                          borderRight: "2px solid #6366f1" } });
+          }
+          // Build visual blocks
+          var dur = videoDuration;
+          var cuts = cutSegments.map(function(c) {
+            return { start: parseTs(c.start) / dur * 100, end: parseTs(c.end) / dur * 100 };
+          }).sort(function(a,b) { return a.start - b.start; });
+
+          var blocks = [];
+          var prev = 0;
+          cuts.forEach(function(c, i) {
+            if (c.start > prev) {
+              blocks.push(React.createElement("div", { key: "k"+i,
+                style: { position: "absolute", left: prev+"%", width: (c.start-prev)+"%",
+                         top: 0, bottom: 0, background: "#6366f122", borderRight: "2px solid #6366f155" } }));
+            }
+            blocks.push(React.createElement("div", { key: "c"+i,
+              style: { position: "absolute", left: c.start+"%", width: (c.end-c.start)+"%",
+                       top: 0, bottom: 0, background: "#ef444422",
+                       borderLeft: "2px solid #ef4444", borderRight: "2px solid #ef4444",
+                       display: "flex", alignItems: "center", justifyContent: "center" } },
+              React.createElement("span", { style: { fontSize: 9, color: "#ef4444", fontWeight: 700 } }, "✂ "+(i+1))
+            ));
+            prev = c.end;
+          });
+          if (prev < 100) {
+            blocks.push(React.createElement("div", { key: "klast",
+              style: { position: "absolute", left: prev+"%", width: (100-prev)+"%",
+                       top: 0, bottom: 0, background: "#6366f122",
+                       borderLeft: "2px solid #6366f155" } }));
+          }
+          return blocks;
+        })()
+      ),
+      React.createElement("div", { style: { display: "flex", justifyContent: "space-between",
+                                             fontSize: 10, color: "#475569", marginTop: 4 } },
+        React.createElement("span", null, "0:00"),
+        React.createElement("span", null, videoDuration ? formatDur(videoDuration) : "--:--")
+      )
+    ),
+
+    // Cut rows
+    cutSegments.map(function(seg, i) {
+      var cutDur = parseTs(seg.end) - parseTs(seg.start);
+      return React.createElement("div", { key: seg.id,
+        style: { display: "flex", alignItems: "center", gap: 8, padding: "10px 12px",
+                 background: "#0f172a", border: "1px solid #1e293b",
+                 borderRadius: 8, marginBottom: 6 } },
+        React.createElement("div", { style: { width: 20, height: 20, borderRadius: "50%",
+                                               background: "#ef444422", border: "1px solid #ef444444",
+                                               color: "#ef4444", fontSize: 10, fontWeight: 700,
+                                               display: "flex", alignItems: "center", justifyContent: "center",
+                                               flexShrink: 0 } }, i+1),
+        React.createElement("span", { style: { fontSize: 12, color: "#64748b" } }, "Remove from"),
+        React.createElement("input", {
+          value: seg.start,
+          onChange: function(e) { updateCutSegment(seg.id, "start", e.target.value); },
+          placeholder: "00:00",
+          style: { background: "#0d1117", border: "1px solid #374151", borderRadius: 6,
+                   padding: "5px 8px", color: "#e2e8f0", fontSize: 12,
+                   fontFamily: "monospace", width: 72, outline: "none", textAlign: "center" }
+        }),
+        React.createElement("span", { style: { fontSize: 12, color: "#64748b" } }, "to"),
+        React.createElement("input", {
+          value: seg.end,
+          onChange: function(e) { updateCutSegment(seg.id, "end", e.target.value); },
+          placeholder: "00:30",
+          style: { background: "#0d1117", border: "1px solid #374151", borderRadius: 6,
+                   padding: "5px 8px", color: "#e2e8f0", fontSize: 12,
+                   fontFamily: "monospace", width: 72, outline: "none", textAlign: "center" }
+        }),
+        cutDur > 0 && React.createElement("span", { style: { fontSize: 11, color: "#ef4444",
+                                                               background: "#ef444411",
+                                                               borderRadius: 4, padding: "2px 7px",
+                                                               fontWeight: 600 } }, "-" + formatDur(cutDur)),
+        React.createElement("button", {
+          onClick: function() { removeCutSegment(seg.id); },
+          style: { padding: "4px 8px", background: "#7f1d1d22", border: "1px solid #7f1d1d",
+                   borderRadius: 6, color: "#ef4444", fontSize: 11, cursor: "pointer" }
+        }, "× Remove")
+      );
+    }),
+
+    // Add cut button
+    React.createElement("button", {
+      onClick: addCutSegment,
+      style: { display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+               padding: "9px 16px", background: "transparent",
+               border: "1px dashed #374151", borderRadius: 8,
+               color: "#475569", fontSize: 12, cursor: "pointer", width: "100%",
+               marginBottom: 12 }
+    }, "✂️ + Add another cut"),
+
+    // Summary row
+    (function() {
+      var totalCut = cutSegments.reduce(function(sum, seg) {
+        return sum + Math.max(0, parseTs(seg.end) - parseTs(seg.start));
+      }, 0);
+      var finalDur = Math.max(0, (videoDuration || 0) - totalCut);
+      return React.createElement("div", { style: { background: "#0f172a", border: "1px solid #1e293b",
+                                                     borderRadius: 8, padding: "12px 16px",
+                                                     display: "flex", gap: 16, alignItems: "center",
+                                                     justifyContent: "center" } },
+        React.createElement("div", { style: { textAlign: "center" } },
+          React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: "#e2e8f0" } },
+            videoDuration ? formatDur(videoDuration) : "--:--"),
+          React.createElement("div", { style: { fontSize: 10, color: "#475569", marginTop: 2 } }, "Original")
+        ),
+        React.createElement("span", { style: { color: "#475569", fontSize: 16 } }, "→"),
+        React.createElement("div", { style: { textAlign: "center" } },
+          React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: "#ef4444" } },
+            totalCut > 0 ? "-" + formatDur(totalCut) : "0:00"),
+          React.createElement("div", { style: { fontSize: 10, color: "#475569", marginTop: 2 } }, "Removed")
+        ),
+        React.createElement("span", { style: { color: "#475569", fontSize: 16 } }, "="),
+        React.createElement("div", { style: { textAlign: "center" } },
+          React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: "#10b981" } },
+            finalDur > 0 ? formatDur(finalDur) : "--:--"),
+          React.createElement("div", { style: { fontSize: 10, color: "#475569", marginTop: 2 } }, "Final")
+        )
+      );
+    })()
+  )
+),
+```
+
+#### Fetch video duration after URL is entered
+
+To show correct timeline, fetch the video duration when URL is pasted.
+Add this after the URL input `onKeyDown` handler, or trigger on blur:
+
+```javascript
+// When URL loses focus or Enter is pressed, fetch duration
+function fetchDuration() {
+  if (!url.trim()) return;
+  fetch(API + "/api/video-duration", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ youtube_url: url })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) { if (d.duration) setVideoDuration(d.duration); })
+  .catch(function() {});
+}
+```
+
+#### New backend endpoint: `POST /api/video-duration`
+
+```python
+class DurationRequest(BaseModel):
+    youtube_url: str
+
+@app.post("/api/video-duration")
+async def get_video_duration_endpoint(req: DurationRequest):
+    """Get video duration without downloading — uses yt-dlp info extraction."""
+    import yt_dlp
+    try:
+        ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(req.youtube_url, download=False)
+            duration = info.get("duration", 0)
+            return {"duration": duration, "title": info.get("title", "")}
+    except Exception as e:
+        return {"duration": 0, "error": str(e)}
+```
+
+---
+
+### TESTS
+
+```python
+def test_parse_timestamp():
+    assert parse_timestamp("1:30") == 90.0
+    assert parse_timestamp("01:00") == 60.0
+    assert parse_timestamp("1:00:00") == 3600.0
+    assert parse_timestamp("45") == 45.0
+
+def test_single_cut():
+    """Remove middle section — output is two segments joined"""
+
+def test_multiple_cuts():
+    """Remove 3 sections — output is 4 segments joined"""
+
+def test_overlapping_cuts_merged():
+    """Overlapping cut ranges are merged before processing"""
+
+def test_cut_beyond_duration_clamped():
+    """Cut end time beyond video duration is clamped to duration"""
+
+def test_no_cuts_copies_file():
+    """Empty cuts list copies file unchanged"""
+
+def test_output_duration_correct():
+    """Output duration = original - sum of cut durations (within 1s)"""
+```
+
+---
+
+### IMPLEMENTATION ORDER
+
+C1. Create `backend/services/cutter.py` with `apply_cuts()` and `parse_timestamp()`
+C2. Add `POST /api/video-duration` endpoint to `main.py`
+C3. Add `cut_enabled` and `cut_segments` to `ProcessRequest`
+C4. Add cut step to pipeline (immediately after download)
+C5. Run `test_parse_timestamp()` and `test_single_cut()` with synthetic video
+C6. Add `cutEnabled`, `cutSegments`, `videoDuration` state to `App.jsx`
+C7. Add `fetchDuration()` call on URL blur/enter
+C8. Add cut section UI card to form (after watermark card)
+C9. Add `addCutSegment`, `removeCutSegment`, `updateCutSegment`, `parseTs`, `formatDur` helpers
+C10. Run full integration test — paste URL, add 2 cuts, process, verify output duration

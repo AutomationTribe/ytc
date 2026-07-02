@@ -150,6 +150,11 @@ function ClipForge() {
   var drawingRef = useRef(false);
   var draftRef = useRef(null);
 
+  // Cut / remove segments — Addendum 6
+  var _cutEnabled = s(false), cutEnabled = _cutEnabled[0], setCutEnabled = _cutEnabled[1];
+  var _cutSegments = s([]), cutSegments = _cutSegments[0], setCutSegments = _cutSegments[1];
+  var _videoDuration = s(0), videoDuration = _videoDuration[0], setVideoDuration = _videoDuration[1];
+
   var cp = PROVIDERS.find(function(p) { return p.id === prov; }) || PROVIDERS[0];
   var currentTmplDef = TEMPLATE_DEFS.find(function(t) { return t.id === tmpl; }) || TEMPLATE_DEFS[0];
 
@@ -352,6 +357,10 @@ function ClipForge() {
         }),
         watermark_frame_width: wmFrame ? wmFrame.frame_width : 960,
         watermark_frame_height: wmFrame ? wmFrame.frame_height : 540,
+
+        // Cut segments
+        cut_enabled: cutEnabled && cutSegments.length > 0,
+        cut_segments: cutSegments.map(function(c) { return { start: c.start, end: c.end }; }),
       }),
     })
     .then(function(r) { return r.json(); })
@@ -381,6 +390,51 @@ function ClipForge() {
         setUploading(false);
       })
       .catch(function() { setUploading(false); });
+  }
+
+  // ── Cut segment helpers — Addendum 6 ──
+
+  function fetchDuration() {
+    if (!url.trim()) return;
+    fetch(API + "/api/video-duration", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ youtube_url: url })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(d) { if (d.duration) setVideoDuration(d.duration); })
+    .catch(function() {});
+  }
+
+  function addCutSegment() {
+    setCutSegments(function(prev) {
+      return prev.concat([{ id: Date.now(), start: "00:00", end: "00:30" }]);
+    });
+  }
+
+  function removeCutSegment(id) {
+    setCutSegments(function(prev) { return prev.filter(function(c) { return c.id !== id; }); });
+  }
+
+  function updateCutSegment(id, field, value) {
+    setCutSegments(function(prev) {
+      return prev.map(function(c) { return c.id === id ? Object.assign({}, c, { [field]: value }) : c; });
+    });
+  }
+
+  function parseTs(ts) {
+    var parts = String(ts).split(':').map(Number);
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    return Number(ts) || 0;
+  }
+
+  function formatDur(secs) {
+    var s = Math.round(Math.abs(secs));
+    var m = Math.floor(s / 60);
+    var h = Math.floor(m / 60);
+    if (h > 0) return h + ':' + String(m % 60).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+    return m + ':' + String(s % 60).padStart(2, '0');
   }
 
   // ── Keyword helper functions — Addendum 5 ──
@@ -521,7 +575,7 @@ function ClipForge() {
           // URL + submit
           React.createElement("div", { style: Object.assign({}, card, { marginBottom: 16 }) },
             React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 20 } },
-              React.createElement("input", { placeholder: "https://youtube.com/watch?v=...", value: url, onChange: function(e) { setUrl(e.target.value); }, onKeyDown: function(e) { if (e.key === "Enter") submit(); }, style: Object.assign({}, inp, { flex: 1, marginBottom: 0 }) }),
+              React.createElement("input", { placeholder: "https://youtube.com/watch?v=...", value: url, onChange: function(e) { setUrl(e.target.value); }, onKeyDown: function(e) { if (e.key === "Enter") { fetchDuration(); submit(); } }, onBlur: fetchDuration, style: Object.assign({}, inp, { flex: 1, marginBottom: 0 }) }),
               React.createElement("button", { onClick: submit, style: Object.assign({}, btn("#6366f1"), { color: "#fff", fontWeight: 700, padding: "12px 24px" }) }, "Process →")
             ),
 
@@ -956,6 +1010,154 @@ function ClipForge() {
                 )
               )
             )
+          )
+        ),
+
+        // ── Cut / Remove Segments card (Addendum 6) ──
+        !job && React.createElement("div", { style: card },
+          React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
+            React.createElement("div", null,
+              React.createElement("p", { style: Object.assign({}, lbl, { marginBottom: 2 }) }, "✂️ Cut / Remove Segments"),
+              React.createElement("p", { style: { margin: 0, fontSize: 12, color: "#475569" } },
+                cutEnabled ? "Define time ranges to remove from the video" : "Toggle on to remove sections from the video"
+              )
+            ),
+            React.createElement("div", {
+              onClick: function() { setCutEnabled(!cutEnabled); },
+              style: { width: 44, height: 24, borderRadius: 12, cursor: "pointer",
+                       background: cutEnabled ? "#6366f1" : "#374151",
+                       position: "relative", transition: "background 0.2s", flexShrink: 0 }
+            },
+              React.createElement("div", {
+                style: { position: "absolute", top: 3,
+                         left: cutEnabled ? 23 : 3,
+                         width: 18, height: 18, borderRadius: "50%",
+                         background: "#fff", transition: "left 0.2s" }
+              })
+            )
+          ),
+
+          cutEnabled && React.createElement("div", { style: { marginTop: 16 } },
+
+            // Timeline bar
+            React.createElement("div", { style: { marginBottom: 16 } },
+              React.createElement("p", { style: Object.assign({}, lbl, { marginBottom: 8 }) }, "Timeline preview"),
+              React.createElement("div", { style: { position: "relative", height: 40, background: "#0f172a",
+                                                     border: "1px solid #1e293b", borderRadius: 8, overflow: "hidden" } },
+                (function() {
+                  if (!videoDuration || cutSegments.length === 0) {
+                    return React.createElement("div", { style: { height: "100%", background: "#6366f122",
+                                                                  borderLeft: "2px solid #6366f155",
+                                                                  borderRight: "2px solid #6366f155" } });
+                  }
+                  var dur = videoDuration;
+                  var cuts = cutSegments.map(function(c) {
+                    return { start: parseTs(c.start) / dur * 100, end: parseTs(c.end) / dur * 100 };
+                  }).sort(function(a, b) { return a.start - b.start; });
+                  var blocks = [];
+                  var prev = 0;
+                  cuts.forEach(function(c, i) {
+                    if (c.start > prev) {
+                      blocks.push(React.createElement("div", { key: "k" + i, style: { position: "absolute", left: prev + "%", width: (c.start - prev) + "%", top: 0, bottom: 0, background: "#6366f122", borderRight: "2px solid #6366f155" } }));
+                    }
+                    blocks.push(React.createElement("div", { key: "c" + i, style: { position: "absolute", left: c.start + "%", width: (c.end - c.start) + "%", top: 0, bottom: 0, background: "#ef444422", borderLeft: "2px solid #ef4444", borderRight: "2px solid #ef4444", display: "flex", alignItems: "center", justifyContent: "center" } },
+                      React.createElement("span", { style: { fontSize: 9, color: "#ef4444", fontWeight: 700 } }, "✂ " + (i + 1))
+                    ));
+                    prev = c.end;
+                  });
+                  if (prev < 100) {
+                    blocks.push(React.createElement("div", { key: "klast", style: { position: "absolute", left: prev + "%", width: (100 - prev) + "%", top: 0, bottom: 0, background: "#6366f122", borderLeft: "2px solid #6366f155" } }));
+                  }
+                  return blocks;
+                })()
+              ),
+              React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 10, color: "#475569", marginTop: 4 } },
+                React.createElement("span", null, "0:00"),
+                React.createElement("span", null, videoDuration ? formatDur(videoDuration) : "--:--")
+              )
+            ),
+
+            // Cut rows
+            cutSegments.map(function(seg, i) {
+              var cutDur = parseTs(seg.end) - parseTs(seg.start);
+              return React.createElement("div", { key: seg.id,
+                style: { display: "flex", alignItems: "center", gap: 8, padding: "10px 12px",
+                         background: "#0f172a", border: "1px solid #1e293b",
+                         borderRadius: 8, marginBottom: 6 } },
+                React.createElement("div", { style: { width: 20, height: 20, borderRadius: "50%",
+                                                       background: "#ef444422", border: "1px solid #ef444444",
+                                                       color: "#ef4444", fontSize: 10, fontWeight: 700,
+                                                       display: "flex", alignItems: "center", justifyContent: "center",
+                                                       flexShrink: 0 } }, i + 1),
+                React.createElement("span", { style: { fontSize: 12, color: "#64748b" } }, "Remove from"),
+                React.createElement("input", {
+                  value: seg.start,
+                  onChange: function(e) { updateCutSegment(seg.id, "start", e.target.value); },
+                  placeholder: "00:00",
+                  style: { background: "#0d1117", border: "1px solid #374151", borderRadius: 6,
+                           padding: "5px 8px", color: "#e2e8f0", fontSize: 12,
+                           fontFamily: "monospace", width: 72, outline: "none", textAlign: "center" }
+                }),
+                React.createElement("span", { style: { fontSize: 12, color: "#64748b" } }, "to"),
+                React.createElement("input", {
+                  value: seg.end,
+                  onChange: function(e) { updateCutSegment(seg.id, "end", e.target.value); },
+                  placeholder: "00:30",
+                  style: { background: "#0d1117", border: "1px solid #374151", borderRadius: 6,
+                           padding: "5px 8px", color: "#e2e8f0", fontSize: 12,
+                           fontFamily: "monospace", width: 72, outline: "none", textAlign: "center" }
+                }),
+                cutDur > 0 && React.createElement("span", { style: { fontSize: 11, color: "#ef4444",
+                                                                       background: "#ef444411",
+                                                                       borderRadius: 4, padding: "2px 7px",
+                                                                       fontWeight: 600 } }, "-" + formatDur(cutDur)),
+                React.createElement("button", {
+                  onClick: function() { removeCutSegment(seg.id); },
+                  style: { padding: "4px 8px", background: "#7f1d1d22", border: "1px solid #7f1d1d",
+                           borderRadius: 6, color: "#ef4444", fontSize: 11, cursor: "pointer" }
+                }, "× Remove")
+              );
+            }),
+
+            // Add cut button
+            React.createElement("button", {
+              onClick: addCutSegment,
+              style: { display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                       padding: "9px 16px", background: "transparent",
+                       border: "1px dashed #374151", borderRadius: 8,
+                       color: "#475569", fontSize: 12, cursor: "pointer", width: "100%",
+                       marginBottom: 12 }
+            }, "✂️ + Add another cut"),
+
+            // Summary row
+            (function() {
+              var totalCut = cutSegments.reduce(function(sum, seg) {
+                return sum + Math.max(0, parseTs(seg.end) - parseTs(seg.start));
+              }, 0);
+              var finalDur = Math.max(0, (videoDuration || 0) - totalCut);
+              return React.createElement("div", { style: { background: "#0f172a", border: "1px solid #1e293b",
+                                                             borderRadius: 8, padding: "12px 16px",
+                                                             display: "flex", gap: 16, alignItems: "center",
+                                                             justifyContent: "center" } },
+                React.createElement("div", { style: { textAlign: "center" } },
+                  React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: "#e2e8f0" } },
+                    videoDuration ? formatDur(videoDuration) : "--:--"),
+                  React.createElement("div", { style: { fontSize: 10, color: "#475569", marginTop: 2 } }, "Original")
+                ),
+                React.createElement("span", { style: { color: "#475569", fontSize: 16 } }, "→"),
+                React.createElement("div", { style: { textAlign: "center" } },
+                  React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: "#ef4444" } },
+                    totalCut > 0 ? "-" + formatDur(totalCut) : "0:00"),
+                  React.createElement("div", { style: { fontSize: 10, color: "#475569", marginTop: 2 } }, "Removed")
+                ),
+                React.createElement("span", { style: { color: "#475569", fontSize: 16 } }, "="),
+                React.createElement("div", { style: { textAlign: "center" } },
+                  React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: "#10b981" } },
+                    finalDur > 0 ? formatDur(finalDur) : "--:--"),
+                  React.createElement("div", { style: { fontSize: 10, color: "#475569", marginTop: 2 } }, "Final")
+                )
+              );
+            })()
           )
         ),
 

@@ -47,6 +47,9 @@ class ProcessRequest(BaseModel):
     watermark_regions: Optional[List[dict]] = None   # [{x, y, w, h, method, color}, ...]
     watermark_frame_width: Optional[int] = 960        # preview frame display width
     watermark_frame_height: Optional[int] = 540       # preview frame display height
+    # Cut / remove segments (Addendum 6)
+    cut_enabled: Optional[bool] = False
+    cut_segments: Optional[List[dict]] = None         # [{start, end}, ...]
 
 
 class FrameRequest(BaseModel):
@@ -280,6 +283,28 @@ def get_job(job_id: str):
     return jobs[job_id]
 
 
+class DurationRequest(BaseModel):
+    youtube_url: str
+
+
+@app.post("/api/video-duration")
+async def get_video_duration_endpoint(req: DurationRequest):
+    """Get video duration without downloading — metadata-only via yt-dlp."""
+    import yt_dlp
+    try:
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "js_runtimes": {"node": {}},
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(req.youtube_url, download=False)
+            return {"duration": info.get("duration", 0), "title": info.get("title", "")}
+    except Exception as e:
+        return {"duration": 0, "error": str(e)}
+
+
 # ──────────────────────────────────────────────────────────────
 # Pipeline helpers
 # ──────────────────────────────────────────────────────────────
@@ -320,6 +345,18 @@ async def pipeline(job_id, req):
             from backend.services.downloader import download_video
             video_path, title = await asyncio.to_thread(download_video, req.youtube_url, job_id)
             logger.info(f"[{job_id}] Downloaded: {video_path}")
+
+            # 1b. Apply cuts if enabled (before transcription / routing)
+            if req.cut_enabled and req.cut_segments:
+                up("processing", 15, f"Removing {len(req.cut_segments)} segment(s)...")
+                from backend.services.cutter import apply_cuts
+                cut_output = video_path.replace(".mp4", "_cut.mp4")
+                success = await asyncio.to_thread(apply_cuts, video_path, req.cut_segments, cut_output)
+                if success and os.path.exists(cut_output):
+                    os.replace(cut_output, video_path)
+                    logger.info(f"[{job_id}] Cuts applied. Trimmed file: {video_path}")
+                else:
+                    logger.warning(f"[{job_id}] Cut failed — continuing with original video")
 
             # ── Routing decision ──
             output_format = req.output_format or "portrait"
