@@ -137,6 +137,8 @@ function ClipForge() {
   var _uploading = s(false), uploading = _uploading[0], setUploading = _uploading[1];
   var fileInputRef = useRef(null);
 
+  var _tmplEnabled = s(false), tmplEnabled = _tmplEnabled[0], setTmplEnabled = _tmplEnabled[1];
+
   // Watermark removal — Addendum 3 (frame capture + multi-region canvas)
   var _wmEnabled = s(false), wmEnabled = _wmEnabled[0], setWmEnabled = _wmEnabled[1];
   var _wmStep = s(1), wmStep = _wmStep[0], setWmStep = _wmStep[1];         // 1=capture 2=mark 3=confirm
@@ -321,16 +323,29 @@ function ClipForge() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        youtube_url: url, mode: mode, template_id: tmpl,
-        num_shorts: num, min_duration: minD, max_duration: maxD,
-        voice_style: "deep", provider: prov,
+        youtube_url: url,
+        mode: mode,
+        provider: prov,
         model: model || cp.models[0],
-        api_key: apiKey || null, elevenlabs_api_key: eKey || null,
-        bg_clip_id: bgClip || null,
-        bg_category: bgCat,
-        split_ratio: splitRatio / 100,
-        template_output_mode: tmplMode,
+        api_key: apiKey || null,
+        elevenlabs_api_key: eKey || null,
+        voice_style: "deep",
+
+        // Template fields — only meaningful when toggle is ON
+        template_enabled: mode === "template" && tmplEnabled,
+        template_id: (mode === "template" && tmplEnabled) ? tmpl : null,
+        bg_clip_id: (mode === "template" && tmplEnabled && bgClip) ? bgClip : null,
+        bg_category: (mode === "template" && tmplEnabled) ? bgCat : null,
+        split_ratio: (mode === "template" && tmplEnabled) ? splitRatio / 100 : 0.55,
+
         output_format: outFmt,
+
+        // Clip settings
+        num_shorts: num,
+        min_duration: minD,
+        max_duration: maxD,
+
+        // Watermark
         watermark_enabled: wmEnabled && wmRegions.length > 0,
         watermark_regions: wmRegions.map(function(r) {
           return { x: r.x, y: r.y, w: r.w, h: r.h, method: r.method, color: r.color };
@@ -620,6 +635,28 @@ function ClipForge() {
           // Template mode panels
           mode === "template" && React.createElement("div", null,
 
+            // Toggle header card
+            React.createElement("div", { style: Object.assign({}, card, { marginBottom: tmplEnabled ? 0 : 16 }) },
+              React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
+                React.createElement("div", null,
+                  React.createElement("p", { style: Object.assign({}, lbl, { marginBottom: 2 }) }, "🎬 Template Settings"),
+                  React.createElement("p", { style: { margin: 0, fontSize: 12, color: "#475569" } },
+                    tmplEnabled
+                      ? "Choose layout, background clip and split ratio"
+                      : "Toggle on to configure template options"
+                  )
+                ),
+                React.createElement("div", {
+                  onClick: function() { setTmplEnabled(!tmplEnabled); },
+                  style: { width: 44, height: 24, borderRadius: 12, cursor: "pointer", background: tmplEnabled ? "#6366f1" : "#374151", position: "relative", transition: "background 0.2s", flexShrink: 0 }
+                },
+                  React.createElement("div", { style: { position: "absolute", top: 3, left: tmplEnabled ? 23 : 3, width: 18, height: 18, borderRadius: "50%", background: "#fff", transition: "left 0.2s" } })
+                )
+              )
+            ),
+
+            tmplEnabled && React.createElement("div", null,
+
             // Section A: Template layout picker
             React.createElement("div", { style: card },
               React.createElement("p", { style: lbl }, "Template Layout"),
@@ -784,6 +821,7 @@ function ClipForge() {
                 )
               )
             )
+            ) // end tmplEnabled
           ),
 
           // Non-template clip settings

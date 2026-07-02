@@ -36,10 +36,11 @@ class ProcessRequest(BaseModel):
     api_key: Optional[str] = None
     elevenlabs_api_key: Optional[str] = None
     # Template compositor fields
+    template_enabled: Optional[bool] = False
     bg_clip_id: Optional[str] = None
     bg_category: Optional[str] = "gameplay"
     split_ratio: Optional[float] = 0.55
-    template_output_mode: Optional[str] = "shorts"  # "shorts" | "full_video"
+    template_output_mode: Optional[str] = "shorts"  # legacy — kept for compatibility
     output_format: Optional[str] = "portrait"        # "portrait" (1080x1920) | "landscape" (1920x1080)
     # Watermark removal (Addendum 3)
     watermark_enabled: Optional[bool] = False
@@ -224,14 +225,30 @@ def capture_frame(req: FrameRequest):
         raise HTTPException(500, f"Frame extraction failed: {result.stderr[-200:]}")
 
     w, h = get_video_dimensions(video_path)
-    frame_h = int(960 * h / w)
+
+    # Use ffprobe to get actual saved frame dimensions instead of calculating them.
+    # scale=960:-1 rounds height to even numbers, so the calculated value can be off by 1.
+    actual_fw, actual_fh = 960, int(960 * h / w)  # fallback
+    probe = subprocess.run([
+        "ffprobe", "-v", "quiet", "-print_format", "json",
+        "-show_streams", frame_path,
+    ], capture_output=True, text=True)
+    if probe.returncode == 0:
+        import json as _json
+        probe_data = _json.loads(probe.stdout)
+        for stream in probe_data.get("streams", []):
+            if stream.get("codec_type") == "video":
+                actual_fw = int(stream["width"])
+                actual_fh = int(stream["height"])
+                break
+
     return {
         "frame_url": f"/outputs/{cache_key}/preview_{int(ts)}s.jpg",
         "video_width": w,
         "video_height": h,
         "timestamp": ts,
-        "frame_width": 960,
-        "frame_height": frame_h,
+        "frame_width": actual_fw,
+        "frame_height": actual_fh,
         "cache_key": cache_key,
     }
 
@@ -304,11 +321,62 @@ async def pipeline(job_id, req):
             video_path, title = await asyncio.to_thread(download_video, req.youtube_url, job_id)
             logger.info(f"[{job_id}] Downloaded: {video_path}")
 
-            # ── LANDSCAPE / FULL VIDEO MODE ──
-            # Triggered by output_format="landscape" for template or voiceover.
-            # Skips transcription and AI entirely — applies template to the whole video.
+            # ── Routing decision ──
             output_format = req.output_format or "portrait"
-            if req.mode in ("template", "voiceover") and output_format == "landscape":
+            use_template = (req.template_enabled is True and req.template_id is not None)
+            logger.info(
+                f"[{job_id}] template_enabled={req.template_enabled} "
+                f"template_id={req.template_id} "
+                f"output_format={output_format} "
+                f"use_template={use_template}"
+            )
+
+            # ── Shared helpers ──
+
+            def apply_wm(file_path, src_w, src_h):
+                """Apply watermark in-place. Always the last step before final output."""
+                if not (req.watermark_enabled and req.watermark_regions):
+                    return
+                from backend.services.watermark_remover import apply_watermark_regions
+                wm_out = file_path.replace(".mp4", "_clean.mp4")
+                ok = apply_watermark_regions(
+                    input_path=file_path, output_path=wm_out,
+                    regions=req.watermark_regions,
+                    video_width=src_w, video_height=src_h,
+                    frame_width=req.watermark_frame_width or 960,
+                    frame_height=req.watermark_frame_height or 540,
+                )
+                if ok and os.path.exists(wm_out):
+                    os.replace(wm_out, file_path)
+                    logger.info(f"[{job_id}] Watermark applied: {file_path}")
+
+            async def gen_keywords(transcript_text):
+                if not (req.api_key or req.provider == "ollama"):
+                    return {}
+                from backend.services.analyzer import generate_keywords
+                try:
+                    up("processing", 90, "Generating SEO keywords...")
+                    return await generate_keywords(
+                        transcript=transcript_text, title=title, style="seo",
+                        api_key=req.api_key or "", provider=req.provider or "groq",
+                        model=req.model,
+                    )
+                except Exception as e:
+                    logger.error(f"[{job_id}] Keyword generation failed: {e}")
+                    return {}
+
+            def kw_fields(kw):
+                return {
+                    "primary_keywords": kw.get("primary_keywords", []),
+                    "secondary_keywords": kw.get("secondary_keywords", []),
+                    "hashtags": kw.get("hashtags", []),
+                    "youtube_tags": kw.get("youtube_tags", ""),
+                    "tiktok_description": kw.get("tiktok_description", ""),
+                }
+
+            # ── ROUTE A: landscape + template ──
+            if output_format == "landscape" and use_template:
+                logger.info(f"[{job_id}] ROUTE A: landscape + template")
                 from backend.services.template_service import TEMPLATES
                 import backend.services.template_compositor as tc
 
@@ -318,17 +386,20 @@ async def pipeline(job_id, req):
                 template_config = TEMPLATES.get(tmpl_id, TEMPLATES["gameplay_split"])
                 split_ratio = float(req.split_ratio or 0.55)
                 layout = template_config.get("layout", "gameplay_split")
+                bar_color = template_config.get("bar_color", "black")
 
                 bg_clip_path = resolve_bg_clip(req.bg_clip_id, req.bg_category)
                 if bg_clip_path:
                     logger.info(f"[{job_id}] Background clip: {bg_clip_path}")
                 bg = bg_clip_path if bg_clip_path and os.path.exists(str(bg_clip_path)) else None
+                if layout != "caption_bar" and bg is None:
+                    logger.warning(f"[{job_id}] No bg clip found, skipping template composite")
+                    tmpl_id = None
+                    bg = None
 
                 job_out = os.path.join("outputs", job_id)
                 os.makedirs(job_out, exist_ok=True)
                 out_path = os.path.join(job_out, "full_video.mp4")
-
-                bar_color = template_config.get("bar_color", "black")
 
                 logger.info(f"[{job_id}] layout={layout} split_ratio={split_ratio:.4f} output_format={output_format}")
                 if layout in ("gameplay_split", "satisfying_split"):
@@ -343,88 +414,75 @@ async def pipeline(job_id, req):
                 else:
                     await asyncio.to_thread(tc.composite_template, video_path, bg, tmpl_id, split_ratio, out_path, fast=True, output_format=output_format)
 
-                duration = get_video_duration(video_path)
+                duration = get_video_duration(out_path)
+                kw = await gen_keywords(title)
                 outputs = [{
                     "path": f"/outputs/{job_id}/full_video.mp4",
                     "title": title,
-                    "caption": title,
+                    "caption": kw.get("tiktok_description", title),
                     "hook": "",
                     "start": 0, "end": duration, "duration": duration,
                     "template_id": tmpl_id,
                     "output_mode": "full_video",
                     "output_format": output_format,
-                    "primary_keywords": [],
-                    "secondary_keywords": [],
-                    "hashtags": [],
-                    "youtube_tags": "",
-                    "tiktok_description": "",
+                    **kw_fields(kw),
                 }]
-                logger.info(f"[{job_id}] Full video output: {out_path}")
+                src_w, src_h = get_video_dimensions(video_path)
+                apply_wm(out_path, src_w, src_h)
+                logger.info(f"[{job_id}] ROUTE A complete: {out_path}")
 
-                # Generate keywords from title (full video skips AI analysis)
-                logger.info(f"[{job_id}] API key received: '{req.api_key[:8] if req.api_key else 'EMPTY'}...' len={len(req.api_key or '')}")
-                if req.api_key or req.provider == "ollama":
-                    from backend.services.analyzer import generate_keywords
-                    try:
-                        up("processing", 90, "Generating SEO keywords...")
-                        kw = await generate_keywords(
-                            transcript=title,
-                            title=title,
-                            style="seo",
-                            api_key=req.api_key or "",
-                            provider=req.provider or "groq",
-                            model=req.model,
-                        )
-                        outputs[0].update({
-                            "primary_keywords": kw.get("primary_keywords", []),
-                            "secondary_keywords": kw.get("secondary_keywords", []),
-                            "hashtags": kw.get("hashtags", []),
-                            "youtube_tags": kw.get("youtube_tags", ""),
-                            "tiktok_description": kw.get("tiktok_description", ""),
-                        })
-                        outputs[0]["caption"] = kw.get("tiktok_description", title)
-                        logger.info(f"[{job_id}] Keywords generated: {kw.get('primary_keywords', [])[:2]}")
-                    except Exception as e:
-                        import traceback
-                        logger.error(f"[{job_id}] Keyword generation FAILED: {e}\n{traceback.format_exc()}")
+            # ── ROUTE B: landscape + no template ──
+            elif output_format == "landscape" and not use_template:
+                logger.info(f"[{job_id}] ROUTE B: landscape, no template")
+                import subprocess as _sp
+                up("processing", 40, "Processing full video...")
+                job_out = os.path.join("outputs", job_id)
+                os.makedirs(job_out, exist_ok=True)
+                out_path = os.path.join(job_out, "full_video.mp4")
+                cmd = [
+                    "ffmpeg", "-y", "-i", video_path,
+                    "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-preset", "fast", "-crf", "23",
+                    "-c:a", "aac", "-b:a", "128k",
+                    "-movflags", "+faststart",
+                    out_path,
+                ]
+                result = _sp.run(cmd, capture_output=True, text=True, timeout=7200)
+                if result.returncode != 0:
+                    raise RuntimeError(f"FFmpeg failed: {result.stderr[-500:]}")
 
-                # Apply watermark to full video if enabled
-                if req.watermark_enabled and req.watermark_regions:
-                    from backend.services.watermark_remover import apply_watermark_regions
-                    src_w, src_h = get_video_dimensions(video_path)
-                    wm_out = out_path.replace(".mp4", "_clean.mp4")
-                    ok = apply_watermark_regions(
-                        input_path=out_path,
-                        output_path=wm_out,
-                        regions=req.watermark_regions,
-                        video_width=src_w,
-                        video_height=src_h,
-                        frame_width=req.watermark_frame_width or 960,
-                        frame_height=req.watermark_frame_height or 540,
-                    )
-                    if ok and os.path.exists(wm_out):
-                        os.replace(wm_out, out_path)
-                        logger.info(f"[{job_id}] Watermark removed from full video")
+                duration = get_video_duration(out_path)
+                kw = await gen_keywords(title)
+                outputs = [{
+                    "path": f"/outputs/{job_id}/full_video.mp4",
+                    "title": title,
+                    "caption": kw.get("tiktok_description", title),
+                    "hook": "",
+                    "start": 0, "end": duration, "duration": duration,
+                    "template_id": None,
+                    "output_mode": "full_video",
+                    "output_format": output_format,
+                    **kw_fields(kw),
+                }]
+                src_w, src_h = get_video_dimensions(video_path)
+                apply_wm(out_path, src_w, src_h)
+                logger.info(f"[{job_id}] ROUTE B complete: {out_path}")
 
-            # ── SHORTS MODE ──
-            else:
-                # 2. Transcribe
+            # ── ROUTE C: portrait + template ──
+            elif use_template:
+                logger.info(f"[{job_id}] ROUTE C: portrait + template")
                 up("transcribing", 30, "Transcribing audio...")
                 from backend.services.transcriber import transcribe_video
                 transcript, segments = await asyncio.to_thread(transcribe_video, video_path)
                 logger.info(f"[{job_id}] Transcript: {len(segments)} segments, {len(transcript)} chars")
 
-                # 3. Analyze
-                up("analyzing", 55, f"AI analyzing with {req.provider}...")
+                up("analyzing", 55, f"AI analyzing with {req.provider} (mode={req.mode})...")
                 from backend.services.analyzer import analyze_content
                 analysis = await analyze_content(
                     transcript, segments, req.mode, req.num_shorts,
                     api_key=req.api_key or "", provider=req.provider, model=req.model,
                 )
-                raw_count = len(analysis.get("clips", []))
-                logger.info(f"[{job_id}] AI returned {raw_count} clips")
-
-                # 4. Clamp clips
                 clips = analysis.get("clips", [])
                 for c in clips:
                     dur = c["end_time"] - c["start_time"]
@@ -436,46 +494,82 @@ async def pipeline(job_id, req):
                 analysis["clips"] = clips
                 logger.info(f"[{job_id}] After clamp: {len(clips)} clips")
 
-                # 5. Resolve background clip
                 bg_clip_path = resolve_bg_clip(req.bg_clip_id, req.bg_category)
-                if bg_clip_path:
+                effective_template_id = req.template_id
+                if not bg_clip_path:
+                    if req.bg_clip_id:
+                        logger.warning(f"[{job_id}] Background clip not found: {req.bg_clip_id}")
+                    from backend.services.template_service import TEMPLATES as _TMPLS
+                    tmpl_layout = (_TMPLS.get(req.template_id) or {}).get("layout", "")
+                    if tmpl_layout != "caption_bar":
+                        logger.warning(f"[{job_id}] No bg clip found, skipping template composite")
+                        effective_template_id = None
+                else:
                     logger.info(f"[{job_id}] Background clip: {bg_clip_path}")
-                elif req.mode == "template" and req.bg_clip_id:
-                    logger.warning(f"[{job_id}] Background clip not found: {req.bg_clip_id}")
 
-                # 6. Process clips
-                up("processing", 70, f"Cutting {len(clips)} clips...")
+                up("processing", 70, f"Cutting {len(clips)} clips with template...")
                 from backend.services.processor import process_clips
                 outputs = await asyncio.to_thread(
                     process_clips, video_path, analysis, req.mode,
-                    req.template_id, req.voice_style, req.elevenlabs_api_key, job_id,
+                    effective_template_id, req.voice_style, req.elevenlabs_api_key, job_id,
                     bg_clip_path=bg_clip_path, split_ratio=float(req.split_ratio or 0.55),
                 )
+
+                kw = await gen_keywords(transcript)
+                src_w, src_h = get_video_dimensions(video_path)
                 for clip in outputs:
                     clip["output_mode"] = "shorts"
-                    clip["output_format"] = req.output_format or "portrait"
-                logger.info(f"[{job_id}] Output: {len(outputs)} clips")
+                    clip["output_format"] = output_format
+                    clip.update(kw_fields(kw))
+                    if not clip.get("caption"):
+                        clip["caption"] = kw.get("tiktok_description", title)
+                    apply_wm(clip["path"].lstrip("/"), src_w, src_h)
+                logger.info(f"[{job_id}] ROUTE C complete: {len(outputs)} clips")
 
+            # ── ROUTE D: portrait + no template ──
+            else:
+                logger.info(f"[{job_id}] ROUTE D: portrait, no template")
+                up("transcribing", 30, "Transcribing audio...")
+                from backend.services.transcriber import transcribe_video
+                transcript, segments = await asyncio.to_thread(transcribe_video, video_path)
+                logger.info(f"[{job_id}] Transcript: {len(segments)} segments, {len(transcript)} chars")
+
+                effective_mode = req.mode if req.mode == "voiceover" else "shorts"
+                up("analyzing", 55, f"AI analyzing with {req.provider} (mode={effective_mode})...")
+                from backend.services.analyzer import analyze_content
+                analysis = await analyze_content(
+                    transcript, segments, effective_mode, req.num_shorts,
+                    api_key=req.api_key or "", provider=req.provider, model=req.model,
+                )
+                clips = analysis.get("clips", [])
+                for c in clips:
+                    dur = c["end_time"] - c["start_time"]
+                    if dur > req.max_duration:
+                        c["end_time"] = c["start_time"] + req.max_duration
+                    if dur < req.min_duration:
+                        c["end_time"] = c["start_time"] + req.min_duration
+                clips = clips[:req.num_shorts]
+                analysis["clips"] = clips
+                logger.info(f"[{job_id}] After clamp: {len(clips)} clips")
+
+                up("processing", 70, f"Cutting {len(clips)} clips...")
+                from backend.services.processor import process_clips
+                outputs = await asyncio.to_thread(
+                    process_clips, video_path, analysis, effective_mode,
+                    None, req.voice_style, req.elevenlabs_api_key, job_id,
+                    bg_clip_path=None, split_ratio=float(req.split_ratio or 0.55),
+                )
+
+                kw = await gen_keywords(transcript)
                 src_w, src_h = get_video_dimensions(video_path)
-                if req.watermark_enabled and req.watermark_regions:
-                    from backend.services.watermark_remover import apply_watermark_regions
-                    cleaned_outputs = []
-                    for clip in outputs:
-                        clip_path = clip["path"].lstrip("/")  # remove leading slash
-                        wm_out = clip_path.replace(".mp4", "_clean.mp4")
-                        ok = apply_watermark_regions(
-                            input_path=clip_path,
-                            output_path=wm_out,
-                            regions=req.watermark_regions,
-                            video_width=src_w,
-                            video_height=src_h,
-                            frame_width=req.watermark_frame_width or 960,
-                            frame_height=req.watermark_frame_height or 540,
-                        )
-                        if ok and os.path.exists(wm_out):
-                            os.replace(wm_out, clip_path)
-                        cleaned_outputs.append(clip)
-                    outputs = cleaned_outputs
+                for clip in outputs:
+                    clip["output_mode"] = "shorts"
+                    clip["output_format"] = output_format
+                    clip.update(kw_fields(kw))
+                    if not clip.get("caption"):
+                        clip["caption"] = kw.get("tiktok_description", title)
+                    apply_wm(clip["path"].lstrip("/"), src_w, src_h)
+                logger.info(f"[{job_id}] ROUTE D complete: {len(outputs)} clips")
 
         logger.info(f"[{job_id}] Final outputs keywords check: "
                     f"{outputs[0].get('primary_keywords', 'MISSING') if outputs else 'NO OUTPUTS'}")

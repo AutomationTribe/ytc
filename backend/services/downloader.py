@@ -32,11 +32,27 @@ def download_video(youtube_url: str, job_id: str) -> tuple:
                 "Chrome/120.0.0.0 Safari/537.36"
             )
         },
+        "js_runtimes": {"node": {}},
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(youtube_url, download=True)
-        title = info.get("title", "video")
+    browsers = [("chrome", None, None, None), ("safari", None, None, None)]
+    info = None
+    for browser in browsers:
+        try:
+            ydl_opts["cookiesfrombrowser"] = browser
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(youtube_url, download=True)
+            break
+        except Exception:
+            continue
+
+    if info is None:
+        # Last resort: try without cookies
+        ydl_opts.pop("cookiesfrombrowser", None)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(youtube_url, download=True)
+
+    title = info.get("title", "video")
 
     # Find the downloaded file
     for fname in ["video.mp4", "video.mkv", "video.webm"]:

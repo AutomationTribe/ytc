@@ -30,6 +30,10 @@ def apply_watermark_regions(
     scale_x = video_width / frame_width
     scale_y = video_height / frame_height
 
+    print(f"[watermark] Video: {video_width}x{video_height}")
+    print(f"[watermark] Frame: {frame_width}x{frame_height}")
+    print(f"[watermark] Scale: {scale_x:.3f}x {scale_y:.3f}y")
+
     filters = []
     current = "[0:v]"
 
@@ -39,6 +43,8 @@ def apply_watermark_regions(
         y = int(region["y"] * scale_y)
         w = int(region["w"] * scale_x)
         h = int(region["h"] * scale_y)
+
+        print(f"[watermark] Region {i}: x={x} y={y} w={w} h={h}")
 
         # Even dimensions (libx264 requirement)
         if w % 2 != 0:

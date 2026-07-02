@@ -17,7 +17,11 @@
       "Bash(python -c ' *)",
       "Bash(env)",
       "Bash(node -e \"require\\('fs'\\).readFileSync\\('src/App.jsx','utf8'\\)\")",
-      "Bash(npx --yes acorn --ecma2020 --module src/App.jsx)"
+      "Bash(npx --yes acorn --ecma2020 --module src/App.jsx)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('backend/main.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(brew install *)",
+      "Read(//usr/local/bin/**)",
+      "Bash(/usr/local/bin/node --version)"
     ]
   }
 }
