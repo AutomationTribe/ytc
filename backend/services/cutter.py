@@ -115,7 +115,6 @@ def apply_cuts(input_path: str, cuts: list, output_path: str) -> bool:
                 "-c:v", "libx264", "-pix_fmt", "yuv420p",
                 "-preset", "ultrafast", "-crf", "23",
                 "-c:a", "aac", "-b:a", "128k",
-                "-avoid_negative_ts", "make_zero",
                 tmp_path,
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)

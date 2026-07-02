@@ -2335,3 +2335,480 @@ C7. Add `fetchDuration()` call on URL blur/enter
 C8. Add cut section UI card to form (after watermark card)
 C9. Add `addCutSegment`, `removeCutSegment`, `updateCutSegment`, `parseTs`, `formatDur` helpers
 C10. Run full integration test — paste URL, add 2 cuts, process, verify output duration
+
+---
+
+## ADDENDUM 7: Unified Pipeline Builder + Voice & Audio Feature (approved design)
+
+Two parts:
+1. Restructure the frontend from 3-tab mode selector to unified pipeline builder
+2. Add Voice & Audio section with Remove Voice / Add Music / AI Voice options
+
+---
+
+### PART 1: FRONTEND RESTRUCTURE
+
+#### Remove the 3-tab mode selector
+
+Delete the current mode row:
+```
+[⚡ Auto Shorts] [🎬 Template] [🎙️ Voiceover]
+```
+
+Replace with a unified page where the user builds their pipeline
+by toggling sections on/off.
+
+#### New page structure
+
+```
+1. Source input (YouTube URL or Upload) — always visible
+2. Output format cards (Shorts/Reels vs Full Video) — always visible
+3. Template Layout section — toggle card
+4. Voice & Audio section — toggle card  (NEW)
+5. Remove Watermarks section — toggle card
+6. Cut Segments section — toggle card
+7. Process button — always visible at bottom
+```
+
+#### New state variables
+
+```javascript
+// Replace: var _mode = s("shorts") with these:
+var _outFmt = s("portrait"), outFmt = _outFmt[0], setOutFmt = _outFmt[1];
+// tmplEnabled already exists — keep it
+// wmEnabled already exists — keep it
+// cutEnabled already exists — keep it
+
+// NEW for voice:
+var _voiceEnabled = s(false), voiceEnabled = _voiceEnabled[0], setVoiceEnabled = _voiceEnabled[1];
+var _voiceMode = s("music"), voiceMode = _voiceMode[0], setVoiceMode = _voiceMode[1];
+// voiceMode: "remove" | "music" | "ai"
+var _musicCategory = s("gaming"), musicCat = _musicCategory[0], setMusicCat = _musicCategory[1];
+var _musicVolume = s(80), musicVol = _musicVolume[0], setMusicVol = _musicVolume[1];
+var _originalVolume = s(20), origVol = _originalVolume[0], setOrigVol = _originalVolume[1];
+var _aiVoiceId = s("arnold"), aiVoiceId = _aiVoiceId[0], setAiVoiceId = _aiVoiceId[1];
+```
+
+#### Update submit() request body
+
+Remove `mode` field entirely. Replace with:
+
+```javascript
+body: JSON.stringify({
+  // Source
+  youtube_url: inputMode === "youtube" ? url : null,
+  uploaded_video_id: inputMode === "upload" ? uploadedVideoId : null,
+
+  // Output
+  output_format: outFmt,
+
+  // Template
+  template_enabled: tmplEnabled,
+  template_id: tmplEnabled ? tmpl : null,
+  bg_clip_id: (tmplEnabled && bgClip) ? bgClip : null,
+  bg_category: tmplEnabled ? bgCat : null,
+  split_ratio: tmplEnabled ? splitRatio / 100 : 0.55,
+
+  // Voice & Audio
+  voice_enabled: voiceEnabled,
+  voice_mode: voiceEnabled ? voiceMode : null,
+  // "remove" | "music" | "ai"
+  music_category: voiceMode === "music" ? musicCat : null,
+  music_volume: musicVol / 100,
+  original_volume: origVol / 100,
+  ai_voice_id: voiceMode === "ai" ? aiVoiceId : null,
+
+  // Watermark
+  watermark_enabled: wmEnabled && wmRegions.length > 0,
+  watermark_regions: wmRegions.map(function(r) {
+    return {x:r.x, y:r.y, w:r.w, h:r.h, method:r.method, color:r.color};
+  }),
+  watermark_frame_width: wmFrame ? wmFrame.frame_width : 960,
+  watermark_frame_height: wmFrame ? wmFrame.frame_height : 540,
+
+  // Cut segments
+  cut_enabled: cutEnabled && cutSegments.length > 0,
+  cut_segments: cutSegments.map(function(c) {
+    return {start: c.start, end: c.end};
+  }),
+
+  // Clip settings (for portrait/shorts mode)
+  num_shorts: num,
+  min_duration: minD,
+  max_duration: maxD,
+
+  // AI provider
+  provider: prov,
+  model: model || cp.models[0],
+  api_key: apiKey || null,
+  elevenlabs_api_key: eKey || null,
+})
+```
+
+#### Voice & Audio section UI
+
+Toggle card — same pattern as Template/Watermark/Cut sections:
+
+```
+┌─────────────────────────────────────────────────────┐
+│ 🎵 Voice & Audio                    [toggle switch] │
+│ Remove voice, add music, or replace with AI voice   │
+├─────────────────────────────────────────────────────┤  ← when toggled on
+│                                                     │
+│  [🔇 Remove Voice] [🎵 Add Music] [🤖 AI Voice]   │
+│   (3 option cards, one selected at a time)          │
+│                                                     │
+│  ── When "Add Music" selected: ──                   │
+│  Music category:                                    │
+│  [🎮 Gaming] [💪 Motivational] [😌 Chill/Lo-fi]  │
+│  [📰 News] [⚽ Sports] [🎭 Cinematic]              │
+│                                                     │
+│  Original audio:  [====|----] 20%                  │
+│  Music volume:    [=======-] 80%                   │
+│                                                     │
+│  ── When "AI Voice" selected: ──                    │
+│  [🎙️ Arnold - Deep] [📖 Antoni - Documentary]     │
+│  [🎭 Josh - Dramatic] [💃 Bella - Conversational] │
+│  ⚠️ Requires ElevenLabs API key                    │
+│                                                     │
+│  ── When "Remove Voice" selected: ──                │
+│  ℹ️ Vocals will be stripped. Background            │
+│     sounds kept.                                    │
+└─────────────────────────────────────────────────────┘
+```
+
+React.createElement implementation — write using same patterns
+as existing toggle sections in App.jsx.
+
+Music categories constant:
+```javascript
+var MUSIC_CATEGORIES = [
+  {id:"gaming", label:"🎮 Gaming"},
+  {id:"motivational", label:"💪 Motivational"},
+  {id:"chill", label:"😌 Chill / Lo-fi"},
+  {id:"news", label:"📰 News / Dramatic"},
+  {id:"sports", label:"⚽ Sports"},
+  {id:"cinematic", label:"🎭 Cinematic"},
+];
+```
+
+AI voices constant:
+```javascript
+var AI_VOICES = [
+  {id:"VR6AewLTigWG4xSOukaG", name:"Arnold", style:"Deep · Powerful", icon:"🎙️", color:"#7c3aed"},
+  {id:"ErXwobaYiN019PkySvjV", name:"Antoni", style:"Documentary · Narrator", icon:"📖", color:"#0369a1"},
+  {id:"TxGEqnHWrfWFTfGW9XjX", name:"Josh", style:"Dramatic · News", icon:"🎭", color:"#b45309"},
+  {id:"EXAVITQu4vr4xnSDxMaL", name:"Bella", style:"Warm · Conversational", icon:"💃", color:"#059669"},
+];
+```
+
+---
+
+### PART 2: BACKEND — VOICE & AUDIO
+
+#### Update ProcessRequest in main.py
+
+```python
+# Voice & Audio
+voice_enabled: Optional[bool] = False
+voice_mode: Optional[str] = None        # "remove" | "music" | "ai"
+music_category: Optional[str] = "gaming"
+music_volume: Optional[float] = 0.8
+original_volume: Optional[float] = 0.2
+ai_voice_id: Optional[str] = None       # ElevenLabs voice ID
+```
+
+#### New file: backend/services/voice_processor.py
+
+```python
+import subprocess
+import os
+import random
+
+
+MUSIC_DIR = "music"  # backgrounds/music/{category}/*.mp3
+
+
+def remove_voice(input_path: str, output_path: str) -> bool:
+    """
+    Remove vocals from video using FFmpeg's pan filter.
+    Uses the center channel cancellation technique:
+    Left - Right cancels out centered vocals in stereo audio.
+    Works best on professionally recorded audio.
+    """
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-af", "pan=stereo|c0=c0-c1|c1=c1-c0",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "128k",
+        output_path
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    if result.returncode != 0:
+        print(f"[voice] remove_voice failed: {result.stderr[-300:]}")
+        return False
+    return True
+
+
+def add_music(
+    input_path: str,
+    output_path: str,
+    category: str,
+    music_volume: float = 0.8,
+    original_volume: float = 0.2,
+) -> bool:
+    """
+    Replace/mix video audio with royalty-free music track.
+    Picks a random track from the category folder.
+    Loops the music if shorter than the video.
+    """
+    music_folder = os.path.join(MUSIC_DIR, category)
+    if not os.path.exists(music_folder):
+        print(f"[voice] Music folder not found: {music_folder}")
+        return False
+
+    tracks = [f for f in os.listdir(music_folder)
+              if f.endswith((".mp3", ".wav", ".m4a", ".ogg"))]
+    if not tracks:
+        print(f"[voice] No music tracks in {music_folder}")
+        return False
+
+    track = os.path.join(music_folder, random.choice(tracks))
+    print(f"[voice] Using music track: {track}")
+
+    # Mix: original audio at orig_vol + music at music_vol
+    # -stream_loop -1 loops the music track
+    filter_complex = (
+        f"[0:a]volume={original_volume}[orig];"
+        f"[1:a]volume={music_volume}[music];"
+        f"[orig][music]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+    )
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", input_path,
+        "-stream_loop", "-1", "-i", track,
+        "-filter_complex", filter_complex,
+        "-map", "0:v",
+        "-map", "[aout]",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k",
+        "-shortest",
+        output_path
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    if result.returncode != 0:
+        print(f"[voice] add_music failed: {result.stderr[-300:]}")
+        return False
+    return True
+
+
+def replace_with_ai_voice(
+    input_path: str,
+    output_path: str,
+    transcript: str,
+    voice_id: str,
+    elevenlabs_api_key: str,
+    original_volume: float = 0.0,
+) -> bool:
+    """
+    Replace video audio with AI-generated voice.
+    1. Generate TTS audio from transcript using ElevenLabs
+    2. Mix AI voice over video (original audio optionally kept at low volume)
+    """
+    import requests
+
+    # Generate AI voice audio
+    audio_path = output_path.replace(".mp4", "_ai_voice.mp3")
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": elevenlabs_api_key
+    }
+    payload = {
+        "text": transcript,
+        "model_id": "eleven_monolingual_v1",
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}
+    }
+
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=120)
+        if response.status_code != 200:
+            print(f"[voice] ElevenLabs error: {response.status_code} {response.text[:200]}")
+            return False
+        with open(audio_path, "wb") as f:
+            f.write(response.content)
+        print(f"[voice] AI audio generated: {audio_path}")
+    except Exception as e:
+        print(f"[voice] ElevenLabs request failed: {e}")
+        return False
+
+    # Mix AI voice with video
+    if original_volume > 0:
+        filter_complex = (
+            f"[0:a]volume={original_volume}[orig];"
+            f"[1:a]volume=1.0[ai];"
+            f"[orig][ai]amix=inputs=2:duration=shortest[aout]"
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_path,
+            "-i", audio_path,
+            "-filter_complex", filter_complex,
+            "-map", "0:v", "-map", "[aout]",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-shortest", output_path
+        ]
+    else:
+        # Replace audio entirely
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_path,
+            "-i", audio_path,
+            "-map", "0:v", "-map", "1:a",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-shortest", output_path
+        ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    if os.path.exists(audio_path):
+        os.remove(audio_path)
+    if result.returncode != 0:
+        print(f"[voice] replace_with_ai_voice failed: {result.stderr[-300:]}")
+        return False
+    return True
+```
+
+#### Update pipeline in main.py
+
+Add voice processing as a step AFTER watermark, applied to every output file.
+
+```python
+# VOICE PROCESSING — runs after watermark, on every output file
+if req.voice_enabled and req.voice_mode:
+    from backend.services.voice_processor import remove_voice, add_music, replace_with_ai_voice
+    voice_outputs = []
+    for clip in outputs:
+        clip_path = clip["path"].lstrip("/")
+        voice_out = clip_path.replace(".mp4", "_voice.mp4")
+        ok = False
+
+        if req.voice_mode == "remove":
+            ok = remove_voice(clip_path, voice_out)
+
+        elif req.voice_mode == "music":
+            ok = add_music(
+                clip_path, voice_out,
+                category=req.music_category or "gaming",
+                music_volume=req.music_volume or 0.8,
+                original_volume=req.original_volume or 0.2,
+            )
+
+        elif req.voice_mode == "ai":
+            if req.elevenlabs_api_key and req.ai_voice_id:
+                # Use transcript from clip metadata or generate from title
+                transcript = clip.get("caption", clip.get("title", ""))
+                ok = replace_with_ai_voice(
+                    clip_path, voice_out,
+                    transcript=transcript,
+                    voice_id=req.ai_voice_id,
+                    elevenlabs_api_key=req.elevenlabs_api_key,
+                    original_volume=0.0,
+                )
+            else:
+                logger.warning(f"[{job_id}] AI voice requires elevenlabs_api_key and ai_voice_id")
+
+        if ok and os.path.exists(voice_out):
+            os.replace(voice_out, clip_path)
+            logger.info(f"[{job_id}] Voice processed ({req.voice_mode}): {clip_path}")
+        else:
+            logger.warning(f"[{job_id}] Voice processing failed for {clip_path}, keeping original")
+
+        voice_outputs.append(clip)
+    outputs = voice_outputs
+```
+
+#### Create music library structure
+
+```
+music/
+├── gaming/
+│   └── .gitkeep
+├── motivational/
+│   └── .gitkeep
+├── chill/
+│   └── .gitkeep
+├── news/
+│   └── .gitkeep
+├── sports/
+│   └── .gitkeep
+└── cinematic/
+    └── .gitkeep
+```
+
+Create script: `scripts/download_music.py`
+Download royalty-free tracks from Pixabay Audio API or direct URLs.
+Each category needs at least 3 tracks of 60-120 seconds each.
+
+#### New endpoint: GET /api/music-categories
+
+```python
+@app.get("/api/music-categories")
+def get_music_categories():
+    """Return available music categories and track counts."""
+    music_dir = "music"
+    categories = []
+    for cat in ["gaming","motivational","chill","news","sports","cinematic"]:
+        cat_path = os.path.join(music_dir, cat)
+        count = 0
+        if os.path.exists(cat_path):
+            count = len([f for f in os.listdir(cat_path)
+                        if f.endswith((".mp3",".wav",".m4a",".ogg"))])
+        categories.append({"id": cat, "count": count})
+    return {"categories": categories}
+```
+
+---
+
+### TESTS
+
+```python
+def test_remove_voice_produces_output():
+    """remove_voice() produces valid mp4 with audio"""
+
+def test_add_music_with_valid_category():
+    """add_music() mixes music track into video"""
+
+def test_add_music_loops_short_track():
+    """Music shorter than video loops to fill duration"""
+
+def test_add_music_missing_category_returns_false():
+    """add_music() returns False when category folder is empty"""
+
+def test_ai_voice_requires_api_key():
+    """replace_with_ai_voice returns False when no API key"""
+
+def test_voice_applied_after_watermark():
+    """Voice processing runs after watermark in pipeline"""
+
+def test_music_volume_mix():
+    """Output audio reflects correct volume ratio"""
+```
+
+---
+
+### IMPLEMENTATION ORDER
+
+V1. Create music/ directory structure with subfolders
+V2. Create scripts/download_music.py and download starter tracks
+V3. Create backend/services/voice_processor.py with all 3 functions
+V4. Add voice fields to ProcessRequest in main.py
+V5. Add GET /api/music-categories endpoint
+V6. Add voice processing step to pipeline (after watermark)
+V7. Test remove_voice() with a synthetic video
+V8. Test add_music() with a real music track
+V9. Remove 3-tab mode selector from App.jsx
+V10. Add voice & audio toggle section to App.jsx
+V11. Update submit() to send voice fields
+V12. Run full integration test for all 3 voice modes

@@ -95,6 +95,22 @@ const TEMPLATE_DEFS = [
 
 const BG_CATEGORIES = ["gameplay", "satisfying", "nature", "custom"];
 
+const MUSIC_CATEGORIES = [
+  { id: "gaming", label: "🎮 Gaming" },
+  { id: "motivational", label: "💪 Motivational" },
+  { id: "chill", label: "😌 Chill / Lo-fi" },
+  { id: "news", label: "📰 News / Dramatic" },
+  { id: "sports", label: "⚽ Sports" },
+  { id: "cinematic", label: "🎭 Cinematic" },
+];
+
+const AI_VOICES = [
+  { id: "VR6AewLTigWG4xSOukaG", name: "Arnold", style: "Deep · Powerful", icon: "🎙️", color: "#7c3aed" },
+  { id: "ErXwobaYiN019PkySvjV", name: "Antoni", style: "Documentary · Narrator", icon: "📖", color: "#0369a1" },
+  { id: "TxGEqnHWrfWFTfGW9XjX", name: "Josh", style: "Dramatic · News", icon: "🎭", color: "#b45309" },
+  { id: "EXAVITQu4vr4xnSDxMaL", name: "Bella", style: "Warm · Conversational", icon: "💃", color: "#059669" },
+];
+
 function getLS(k, fallback) {
   try { return localStorage.getItem(k) || fallback; } catch(e) { return fallback; }
 }
@@ -155,6 +171,16 @@ function ClipForge() {
   var _cutSegments = s([]), cutSegments = _cutSegments[0], setCutSegments = _cutSegments[1];
   var _videoDuration = s(0), videoDuration = _videoDuration[0], setVideoDuration = _videoDuration[1];
 
+  // Voice & Audio — Addendum 7
+  var _voiceEnabled = s(false), voiceEnabled = _voiceEnabled[0], setVoiceEnabled = _voiceEnabled[1];
+  var _voiceMode = s("music"), voiceMode = _voiceMode[0], setVoiceMode = _voiceMode[1];
+  var _musicCat = s("gaming"), musicCat = _musicCat[0], setMusicCat = _musicCat[1];
+  var _musicVol = s(80), musicVol = _musicVol[0], setMusicVol = _musicVol[1];
+  var _origVol = s(20), origVol = _origVol[0], setOrigVol = _origVol[1];
+  var _aiVoiceId = s("VR6AewLTigWG4xSOukaG"), aiVoiceId = _aiVoiceId[0], setAiVoiceId = _aiVoiceId[1];
+  var _pitchShift = s(false), pitchShift = _pitchShift[0], setPitchShift = _pitchShift[1];
+  var _speedAdj = s(false), speedAdj = _speedAdj[0], setSpeedAdj = _speedAdj[1];
+
   // Local video upload
   var _inputMode = s("youtube"), inputMode = _inputMode[0], setInputMode = _inputMode[1];
   var _uploadedVideoId = s(null), uploadedVideoId = _uploadedVideoId[0], setUploadedVideoId = _uploadedVideoId[1];
@@ -177,12 +203,12 @@ function ClipForge() {
 
   // Fetch background clips when category changes
   useEffect(function() {
-    if (mode !== "template") return;
+    if (!tmplEnabled) return;
     fetch(API + "/api/backgrounds/" + bgCat)
       .then(function(r) { return r.json(); })
       .then(function(d) { setBgClips(d.clips || []); setBgClip(""); })
       .catch(function() { setBgClips([]); });
-  }, [bgCat, mode]);
+  }, [bgCat, tmplEnabled]);
 
   useEffect(function() {
     if (!jobId) return;
@@ -352,11 +378,11 @@ function ClipForge() {
         voice_style: "deep",
 
         // Template fields — only meaningful when toggle is ON
-        template_enabled: mode === "template" && tmplEnabled,
-        template_id: (mode === "template" && tmplEnabled) ? tmpl : null,
-        bg_clip_id: (mode === "template" && tmplEnabled && bgClip) ? bgClip : null,
-        bg_category: (mode === "template" && tmplEnabled) ? bgCat : null,
-        split_ratio: (mode === "template" && tmplEnabled) ? splitRatio / 100 : 0.55,
+        template_enabled: tmplEnabled,
+        template_id: tmplEnabled ? tmpl : null,
+        bg_clip_id: (tmplEnabled && bgClip) ? bgClip : null,
+        bg_category: tmplEnabled ? bgCat : null,
+        split_ratio: tmplEnabled ? splitRatio / 100 : 0.55,
 
         output_format: outFmt,
 
@@ -376,6 +402,16 @@ function ClipForge() {
         // Cut segments
         cut_enabled: cutEnabled && cutSegments.length > 0,
         cut_segments: cutSegments.map(function(c) { return { start: c.start, end: c.end }; }),
+
+        // Voice & Audio
+        voice_enabled: voiceEnabled,
+        voice_mode: voiceEnabled ? voiceMode : null,
+        music_category: voiceMode === "music" ? musicCat : null,
+        music_volume: musicVol / 100,
+        original_volume: origVol / 100,
+        ai_voice_id: voiceMode === "ai" ? aiVoiceId : null,
+        pitch_shift_enabled: pitchShift,
+        speed_adjust_enabled: speedAdj,
       }),
     })
     .then(function(r) { return r.json(); })
@@ -580,7 +616,7 @@ function ClipForge() {
 
       // Header
       React.createElement("header", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 32px", borderBottom: "1px solid #1e293b" } },
-        React.createElement("div", { style: { fontSize: 20, fontWeight: 700, color: "#a78bfa" } }, "⚡ ClipForge"),
+        React.createElement("div", { style: { fontSize: 20, fontWeight: 700, color: "#a78bfa", cursor: "pointer" }, onClick: reset }, "⚡ ClipForge"),
         React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } },
           React.createElement("span", { style: { fontSize: 12, background: cp.color + "22", color: cp.color, padding: "4px 10px", borderRadius: 12, fontWeight: 600 } }, cp.name),
           React.createElement("button", { onClick: function() { setSettings(!showSettings); }, style: btn("#1e293b") }, "⚙️ Settings")
@@ -707,29 +743,18 @@ function ClipForge() {
 
             err && React.createElement("div", { style: { background: "#7f1d1d33", border: "1px solid #ef444455", borderRadius: 8, padding: "10px 14px", color: "#fca5a5", fontSize: 13, marginBottom: 16 } }, "⚠️ " + err),
 
-            (mode === "template" || mode === "voiceover") && outFmt === "landscape" && React.createElement("div", { style: { background: "#1c1917", border: "1px solid #78350f", borderRadius: 8, padding: "10px 14px", color: "#fcd34d", fontSize: 13, marginBottom: 16 } },
+            outFmt === "landscape" && React.createElement("div", { style: { background: "#1c1917", border: "1px solid #78350f", borderRadius: 8, padding: "10px 14px", color: "#fcd34d", fontSize: 13, marginBottom: 16 } },
               "⏳ Full video processing takes 5-15 minutes depending on length."
             ),
 
             !apiKey && prov !== "ollama" && React.createElement("div", { style: { background: "#78350f33", border: "1px solid #f59e0b55", borderRadius: 8, padding: "10px 14px", color: "#fcd34d", fontSize: 13, marginBottom: 16 } },
               "No " + cp.name + " key. ",
               React.createElement("button", { onClick: function() { setSettings(true); }, style: { background: "none", border: "none", color: "#fbbf24", cursor: "pointer", textDecoration: "underline", fontSize: 13, padding: 0 } }, "Open Settings →")
-            ),
-
-            // Mode selector
-            React.createElement("p", { style: lbl }, "Mode"),
-            React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 0 } },
-              [["shorts", "⚡ Auto Shorts"], ["template", "🎬 Template"], ["voiceover", "🎙️ Voiceover"]].map(function(m) {
-                return React.createElement("button", {
-                  key: m[0], onClick: function() { setMode(m[0]); },
-                  style: Object.assign({}, btn(mode === m[0] ? "#6366f133" : "#1e293b"), { border: mode === m[0] ? "1px solid #6366f1" : "1px solid #374151", flex: 1 })
-                }, m[1]);
-              })
             )
           ),
 
-          // ── Output Format Selector (template + voiceover) ──
-          (mode === "template" || mode === "voiceover") && React.createElement("div", { style: card },
+          // ── Output Format Selector ──
+          React.createElement("div", { style: card },
             React.createElement("p", { style: lbl }, "Output Format"),
             React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 } },
 
@@ -810,10 +835,430 @@ function ClipForge() {
               : React.createElement("div", { style: { background: "#10b98112", border: "1px solid #10b98133", borderRadius: 8, padding: "10px 14px", color: "#6ee7b7", fontSize: 13 } },
                   "🖥️ The full video will be processed as one 1920×1080 landscape output. No AI cutting. Processing takes 5–15 minutes depending on video length."
                 )
+          )
+        ),
+
+        // ── Cut / Remove Segments card (Addendum 6) ──
+        !job && React.createElement("div", { style: card },
+          React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
+            React.createElement("div", null,
+              React.createElement("p", { style: Object.assign({}, lbl, { marginBottom: 2 }) }, "✂️ Cut / Remove Segments"),
+              React.createElement("p", { style: { margin: 0, fontSize: 12, color: "#475569" } },
+                cutEnabled ? "Define time ranges to remove from the video" : "Toggle on to remove sections from the video"
+              )
+            ),
+            React.createElement("div", {
+              onClick: function() { setCutEnabled(!cutEnabled); },
+              style: { width: 44, height: 24, borderRadius: 12, cursor: "pointer",
+                       background: cutEnabled ? "#6366f1" : "#374151",
+                       position: "relative", transition: "background 0.2s", flexShrink: 0 }
+            },
+              React.createElement("div", {
+                style: { position: "absolute", top: 3,
+                         left: cutEnabled ? 23 : 3,
+                         width: 18, height: 18, borderRadius: "50%",
+                         background: "#fff", transition: "left 0.2s" }
+              })
+            )
           ),
 
-          // Template mode panels
-          mode === "template" && React.createElement("div", null,
+          cutEnabled && React.createElement("div", { style: { marginTop: 16 } },
+
+            // Timeline bar
+            React.createElement("div", { style: { marginBottom: 16 } },
+              React.createElement("p", { style: Object.assign({}, lbl, { marginBottom: 8 }) }, "Timeline preview"),
+              React.createElement("div", { style: { position: "relative", height: 40, background: "#0f172a",
+                                                     border: "1px solid #1e293b", borderRadius: 8, overflow: "hidden" } },
+                (function() {
+                  if (!videoDuration || cutSegments.length === 0) {
+                    return React.createElement("div", { style: { height: "100%", background: "#6366f122",
+                                                                  borderLeft: "2px solid #6366f155",
+                                                                  borderRight: "2px solid #6366f155" } });
+                  }
+                  var dur = videoDuration;
+                  var cuts = cutSegments.map(function(c) {
+                    return { start: parseTs(c.start) / dur * 100, end: parseTs(c.end) / dur * 100 };
+                  }).sort(function(a, b) { return a.start - b.start; });
+                  var blocks = [];
+                  var prev = 0;
+                  cuts.forEach(function(c, i) {
+                    if (c.start > prev) {
+                      blocks.push(React.createElement("div", { key: "k" + i, style: { position: "absolute", left: prev + "%", width: (c.start - prev) + "%", top: 0, bottom: 0, background: "#6366f122", borderRight: "2px solid #6366f155" } }));
+                    }
+                    blocks.push(React.createElement("div", { key: "c" + i, style: { position: "absolute", left: c.start + "%", width: (c.end - c.start) + "%", top: 0, bottom: 0, background: "#ef444422", borderLeft: "2px solid #ef4444", borderRight: "2px solid #ef4444", display: "flex", alignItems: "center", justifyContent: "center" } },
+                      React.createElement("span", { style: { fontSize: 9, color: "#ef4444", fontWeight: 700 } }, "✂ " + (i + 1))
+                    ));
+                    prev = c.end;
+                  });
+                  if (prev < 100) {
+                    blocks.push(React.createElement("div", { key: "klast", style: { position: "absolute", left: prev + "%", width: (100 - prev) + "%", top: 0, bottom: 0, background: "#6366f122", borderLeft: "2px solid #6366f155" } }));
+                  }
+                  return blocks;
+                })()
+              ),
+              React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 10, color: "#475569", marginTop: 4 } },
+                React.createElement("span", null, "0:00"),
+                React.createElement("span", null, videoDuration ? formatDur(videoDuration) : "--:--")
+              )
+            ),
+
+            // Cut rows
+            cutSegments.map(function(seg, i) {
+              var cutDur = parseTs(seg.end) - parseTs(seg.start);
+              return React.createElement("div", { key: seg.id,
+                style: { display: "flex", alignItems: "center", gap: 8, padding: "10px 12px",
+                         background: "#0f172a", border: "1px solid #1e293b",
+                         borderRadius: 8, marginBottom: 6 } },
+                React.createElement("div", { style: { width: 20, height: 20, borderRadius: "50%",
+                                                       background: "#ef444422", border: "1px solid #ef444444",
+                                                       color: "#ef4444", fontSize: 10, fontWeight: 700,
+                                                       display: "flex", alignItems: "center", justifyContent: "center",
+                                                       flexShrink: 0 } }, i + 1),
+                React.createElement("span", { style: { fontSize: 12, color: "#64748b" } }, "Remove from"),
+                React.createElement("input", {
+                  value: seg.start,
+                  onChange: function(e) { updateCutSegment(seg.id, "start", e.target.value); },
+                  placeholder: "00:00",
+                  style: { background: "#0d1117", border: "1px solid #374151", borderRadius: 6,
+                           padding: "5px 8px", color: "#e2e8f0", fontSize: 12,
+                           fontFamily: "monospace", width: 72, outline: "none", textAlign: "center" }
+                }),
+                React.createElement("span", { style: { fontSize: 12, color: "#64748b" } }, "to"),
+                React.createElement("input", {
+                  value: seg.end,
+                  onChange: function(e) { updateCutSegment(seg.id, "end", e.target.value); },
+                  placeholder: "00:30",
+                  style: { background: "#0d1117", border: "1px solid #374151", borderRadius: 6,
+                           padding: "5px 8px", color: "#e2e8f0", fontSize: 12,
+                           fontFamily: "monospace", width: 72, outline: "none", textAlign: "center" }
+                }),
+                React.createElement("button", {
+                  onClick: function() {
+                    updateCutSegment(seg.id, "end", "99:99");
+                  },
+                  style: { padding: "4px 8px", background: "#0f172a",
+                           border: "1px solid #374151", borderRadius: 6,
+                           color: "#475569", fontSize: 11, cursor: "pointer" }
+                }, "→ End"),
+                cutDur > 0 && React.createElement("span", { style: { fontSize: 11, color: "#ef4444",
+                                                                       background: "#ef444411",
+                                                                       borderRadius: 4, padding: "2px 7px",
+                                                                       fontWeight: 600 } }, "-" + formatDur(cutDur)),
+                React.createElement("button", {
+                  onClick: function() { removeCutSegment(seg.id); },
+                  style: { padding: "4px 8px", background: "#7f1d1d22", border: "1px solid #7f1d1d",
+                           borderRadius: 6, color: "#ef4444", fontSize: 11, cursor: "pointer" }
+                }, "× Remove")
+              );
+            }),
+
+            // Add cut button
+            React.createElement("button", {
+              onClick: addCutSegment,
+              style: { display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                       padding: "9px 16px", background: "transparent",
+                       border: "1px dashed #374151", borderRadius: 8,
+                       color: "#475569", fontSize: 12, cursor: "pointer", width: "100%",
+                       marginBottom: 12 }
+            }, "✂️ + Add another cut"),
+
+            // Summary row
+            (function() {
+              var totalCut = cutSegments.reduce(function(sum, seg) {
+                return sum + Math.max(0, parseTs(seg.end) - parseTs(seg.start));
+              }, 0);
+              var finalDur = Math.max(0, (videoDuration || 0) - totalCut);
+              return React.createElement("div", { style: { background: "#0f172a", border: "1px solid #1e293b",
+                                                             borderRadius: 8, padding: "12px 16px",
+                                                             display: "flex", gap: 16, alignItems: "center",
+                                                             justifyContent: "center" } },
+                React.createElement("div", { style: { textAlign: "center" } },
+                  React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: "#e2e8f0" } },
+                    videoDuration ? formatDur(videoDuration) : "--:--"),
+                  React.createElement("div", { style: { fontSize: 10, color: "#475569", marginTop: 2 } }, "Original")
+                ),
+                React.createElement("span", { style: { color: "#475569", fontSize: 16 } }, "→"),
+                React.createElement("div", { style: { textAlign: "center" } },
+                  React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: "#ef4444" } },
+                    totalCut > 0 ? "-" + formatDur(totalCut) : "0:00"),
+                  React.createElement("div", { style: { fontSize: 10, color: "#475569", marginTop: 2 } }, "Removed")
+                ),
+                React.createElement("span", { style: { color: "#475569", fontSize: 16 } }, "="),
+                React.createElement("div", { style: { textAlign: "center" } },
+                  React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: "#10b981" } },
+                    finalDur > 0 ? formatDur(finalDur) : "--:--"),
+                  React.createElement("div", { style: { fontSize: 10, color: "#475569", marginTop: 2 } }, "Final")
+                )
+              );
+            })()
+          )
+        ),
+
+        // ── Voice & Audio card (Addendum 7) ──
+        !job && React.createElement("div", { style: card },
+          // Header + toggle
+          React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: voiceEnabled ? 20 : 0 } },
+            React.createElement("div", null,
+              React.createElement("p", { style: Object.assign({}, lbl, { marginBottom: 2 }) }, "🎵 Voice & Audio"),
+              React.createElement("p", { style: { margin: 0, fontSize: 12, color: "#475569" } },
+                voiceEnabled ? "Remove voice, add music, or replace with AI voice" : "Toggle on to modify audio"
+              )
+            ),
+            React.createElement("div", {
+              onClick: function() { setVoiceEnabled(!voiceEnabled); },
+              style: { width: 44, height: 24, borderRadius: 12, cursor: "pointer",
+                       background: voiceEnabled ? "#6366f1" : "#374151",
+                       position: "relative", transition: "background 0.2s", flexShrink: 0 }
+            },
+              React.createElement("div", { style: { position: "absolute", top: 3,
+                       left: voiceEnabled ? 23 : 3,
+                       width: 18, height: 18, borderRadius: "50%",
+                       background: "#fff", transition: "left 0.2s" } })
+            )
+          ),
+
+          voiceEnabled && React.createElement("div", null,
+
+            // Mode picker: 3 option cards
+            React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 16 } },
+              [
+                { id: "remove", icon: "🔇", label: "Remove Voice", desc: "Strip vocals, keep background" },
+                { id: "music", icon: "🎵", label: "Add Music", desc: "Mix royalty-free music track" },
+                { id: "ai", icon: "🤖", label: "AI Voice", desc: "Replace with ElevenLabs TTS" },
+              ].map(function(opt) {
+                var sel = voiceMode === opt.id;
+                return React.createElement("div", {
+                  key: opt.id,
+                  onClick: function() { setVoiceMode(opt.id); },
+                  style: { cursor: "pointer", borderRadius: 10, padding: "12px 10px",
+                           background: sel ? "#6366f115" : "#0f172a",
+                           border: sel ? "2px solid #6366f1" : "2px solid #1e293b",
+                           textAlign: "center" }
+                },
+                  React.createElement("div", { style: { fontSize: 22, marginBottom: 6 } }, opt.icon),
+                  React.createElement("p", { style: { margin: "0 0 4px", fontSize: 12, fontWeight: 700, color: sel ? "#a5b4fc" : "#e2e8f0" } }, opt.label),
+                  React.createElement("p", { style: { margin: 0, fontSize: 10, color: "#475569", lineHeight: 1.4 } }, opt.desc)
+                );
+              })
+            ),
+
+            // Remove Voice: just an info note
+            voiceMode === "remove" && React.createElement("div", { style: { background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8, padding: "12px 14px", color: "#94a3b8", fontSize: 13 } },
+              "ℹ️ Vocals will be stripped using center-channel cancellation. Background sounds and music are kept."
+            ),
+
+            // Add Music: category pills + volume sliders
+            voiceMode === "music" && React.createElement("div", null,
+              React.createElement("p", { style: lbl }, "Music Category"),
+              React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 } },
+                MUSIC_CATEGORIES.map(function(cat) {
+                  var sel = musicCat === cat.id;
+                  return React.createElement("button", {
+                    key: cat.id,
+                    onClick: function() { setMusicCat(cat.id); },
+                    style: Object.assign({}, btn(sel ? "#6366f133" : "#0f172a"), {
+                      border: sel ? "1px solid #6366f1" : "1px solid #374151",
+                      fontSize: 12, color: sel ? "#a5b4fc" : "#64748b"
+                    })
+                  }, cat.label);
+                })
+              ),
+              React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 } },
+                React.createElement("div", null,
+                  React.createElement("div", { style: { display: "flex", justifyContent: "space-between" } },
+                    React.createElement("p", { style: lbl }, "Original audio"),
+                    React.createElement("span", { style: { fontSize: 12, color: "#6366f1", fontWeight: 700 } }, origVol + "%")
+                  ),
+                  React.createElement("input", { type: "range", min: 0, max: 100, value: origVol,
+                    onChange: function(e) { setOrigVol(+e.target.value); }, style: slider })
+                ),
+                React.createElement("div", null,
+                  React.createElement("div", { style: { display: "flex", justifyContent: "space-between" } },
+                    React.createElement("p", { style: lbl }, "Music volume"),
+                    React.createElement("span", { style: { fontSize: 12, color: "#6366f1", fontWeight: 700 } }, musicVol + "%")
+                  ),
+                  React.createElement("input", { type: "range", min: 0, max: 100, value: musicVol,
+                    onChange: function(e) { setMusicVol(+e.target.value); }, style: slider })
+                )
+              )
+            ),
+
+            // AI Voice: voice picker + ElevenLabs warning
+            voiceMode === "ai" && React.createElement("div", null,
+              React.createElement("p", { style: lbl }, "AI Voice"),
+              React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 } },
+                AI_VOICES.map(function(v) {
+                  var sel = aiVoiceId === v.id;
+                  return React.createElement("div", {
+                    key: v.id,
+                    onClick: function() { setAiVoiceId(v.id); },
+                    style: { cursor: "pointer", borderRadius: 8, padding: "10px 12px",
+                             background: sel ? v.color + "22" : "#0f172a",
+                             border: sel ? "2px solid " + v.color : "2px solid #1e293b",
+                             display: "flex", alignItems: "center", gap: 10 }
+                  },
+                    React.createElement("span", { style: { fontSize: 20 } }, v.icon),
+                    React.createElement("div", null,
+                      React.createElement("p", { style: { margin: 0, fontSize: 12, fontWeight: 700, color: sel ? v.color : "#e2e8f0" } }, v.name),
+                      React.createElement("p", { style: { margin: 0, fontSize: 10, color: "#64748b" } }, v.style)
+                    )
+                  );
+                })
+              ),
+              !eKey && React.createElement("div", { style: { background: "#78350f33", border: "1px solid #f59e0b55", borderRadius: 8, padding: "10px 14px", color: "#fcd34d", fontSize: 12 } },
+                "⚠️ Requires ElevenLabs API key. ",
+                React.createElement("button", { onClick: function() { setSettings(true); }, style: { background: "none", border: "none", color: "#fbbf24", cursor: "pointer", textDecoration: "underline", fontSize: 12, padding: 0 } }, "Add in Settings →")
+              )
+            ),
+
+            // Fingerprint avoidance options
+            React.createElement("div", { style: { marginTop: 16, padding: "12px 14px", background: "#0f172a", border: "1px solid #1e293b", borderRadius: 8 } },
+              React.createElement("p", { style: Object.assign({}, lbl, { marginBottom: 10 }) }, "Fingerprint Avoidance"),
+              [
+                { state: pitchShift, setter: setPitchShift, label: "Pitch shift audio (+2 semitones)", desc: "Breaks audio fingerprinting. Imperceptible to listeners." },
+                { state: speedAdj, setter: setSpeedAdj, label: "Speed adjust (1.02×)", desc: "Breaks video fingerprinting. 2% faster than original." },
+              ].map(function(opt, i) {
+                return React.createElement("div", { key: i,
+                  onClick: function() { opt.setter(!opt.state); },
+                  style: { display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer",
+                           marginBottom: i === 0 ? 10 : 0 }
+                },
+                  React.createElement("div", { style: {
+                    width: 16, height: 16, borderRadius: 4, flexShrink: 0, marginTop: 1,
+                    background: opt.state ? "#6366f1" : "transparent",
+                    border: opt.state ? "2px solid #6366f1" : "2px solid #374151",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  } },
+                    opt.state && React.createElement("span", { style: { fontSize: 10, color: "#fff", lineHeight: 1 } }, "✓")
+                  ),
+                  React.createElement("div", null,
+                    React.createElement("p", { style: { margin: 0, fontSize: 12, color: opt.state ? "#e2e8f0" : "#94a3b8", fontWeight: opt.state ? 600 : 400 } }, opt.label),
+                    React.createElement("p", { style: { margin: 0, fontSize: 11, color: "#475569" } }, opt.desc)
+                  )
+                );
+              })
+            )
+          )
+        ),
+
+        // ── Watermark removal — 3-step flow ──
+        !job && React.createElement("div", { style: card },
+            // Header row: title + toggle
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: wmEnabled ? 20 : 0 } },
+              React.createElement("div", null,
+                React.createElement("p", { style: Object.assign({}, lbl, { marginBottom: 2 }) }, "🎯 Remove Watermarks / Logos"),
+                React.createElement("p", { style: { margin: 0, fontSize: 12, color: "#475569" } }, "Frame capture + draw regions · multi-logo support")
+              ),
+              React.createElement("div", {
+                onClick: function() { setWmEnabled(!wmEnabled); if (wmEnabled) { setWmStep(1); setWmFrame(null); setWmRegions([]); } },
+                style: { width: 44, height: 24, borderRadius: 12, cursor: "pointer", background: wmEnabled ? "#6366f1" : "#374151", position: "relative", transition: "background 0.2s", flexShrink: 0 }
+              },
+                React.createElement("div", { style: { position: "absolute", top: 3, left: wmEnabled ? 23 : 3, width: 18, height: 18, borderRadius: "50%", background: "#fff", transition: "left 0.2s" } })
+              )
+            ),
+
+            wmEnabled && React.createElement("div", null,
+
+              // Step indicator
+              React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 16 } },
+                ["1 Capture", "2 Mark", "3 Confirm"].map(function(label, i) {
+                  var active = wmStep === i + 1;
+                  return React.createElement("div", { key: i, style: { flex: 1, textAlign: "center", padding: "6px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, background: active ? "#6366f122" : "#0f172a", color: active ? "#a5b4fc" : "#475569", border: active ? "1px solid #6366f1" : "1px solid #1e293b" } }, label);
+                })
+              ),
+
+              // ── STEP 1: Capture frame ──
+              wmStep === 1 && React.createElement("div", null,
+                React.createElement("p", { style: { margin: "0 0 8px", fontSize: 13, color: "#94a3b8" } }, "Enter a timestamp where the watermark is visible, then capture."),
+                React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 10 } },
+                  React.createElement("input", { value: wmTs, onChange: function(e) { setWmTs(e.target.value); }, placeholder: "00:00:05", style: Object.assign({}, inp, { flex: 1, marginBottom: 0 }) }),
+                  React.createElement("button", {
+                    onClick: captureFrame,
+                    disabled: wmCapturing,
+                    style: Object.assign({}, btn("#6366f1"), { color: "#fff", fontWeight: 700, opacity: wmCapturing ? 0.6 : 1 })
+                  }, wmCapturing ? "⏳ Loading..." : "📸 Capture")
+                ),
+                React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 } },
+                  [["2s", "2"], ["10s", "10"], ["1min", "60"], ["5min", "300"], ["10min", "600"]].map(function(p) {
+                    return React.createElement("button", { key: p[0], onClick: function() { setWmTs(p[1]); }, style: Object.assign({}, btn("#0f172a"), { fontSize: 11, padding: "4px 10px" }) }, p[0]);
+                  })
+                ),
+                React.createElement("div", { style: { background: "#0f172a", borderRadius: 10, height: 120, display: "flex", alignItems: "center", justifyContent: "center", color: "#475569", fontSize: 13 } },
+                  "🎬 Enter timestamp and click Capture · Logos appear at 2–5s"
+                )
+              ),
+
+              // ── STEP 2: Mark regions ──
+              wmStep === 2 && wmFrame && React.createElement("div", null,
+                React.createElement("p", { style: { margin: "0 0 8px", fontSize: 13, color: "#94a3b8" } }, "Click and drag to draw a box over each logo. Draw as many as needed."),
+                // Frame + canvas overlay
+                React.createElement("div", { style: { position: "relative", marginBottom: 12, borderRadius: 8, overflow: "hidden", cursor: "crosshair" } },
+                  React.createElement("img", { src: API + wmFrame.frame_url, style: { width: "100%", display: "block" }, draggable: false }),
+                  React.createElement("canvas", { ref: canvasRef, style: { position: "absolute", inset: 0, width: "100%", height: "100%" } })
+                ),
+                // Region list
+                wmRegions.length > 0 && React.createElement("div", { style: { marginBottom: 12 } },
+                  React.createElement("p", { style: lbl }, "Marked regions"),
+                  wmRegions.map(function(r, i) {
+                    return React.createElement("div", { key: r.id, style: { display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", background: "#0f172a", borderRadius: 8, marginBottom: 6 } },
+                      React.createElement("span", { style: { background: "#ef4444", color: "#fff", borderRadius: 4, width: 20, height: 20, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, flexShrink: 0 } }, i + 1),
+                      React.createElement("span", { style: { fontSize: 12, color: "#94a3b8", flex: 1 } }, "x:" + Math.round(r.x) + " y:" + Math.round(r.y) + " · " + Math.round(r.w) + "×" + Math.round(r.h) + "px"),
+                      React.createElement("select", {
+                        value: r.method,
+                        onChange: function(e) { var v = e.target.value; setWmRegions(function(prev) { return prev.map(function(x, j) { return j === i ? Object.assign({}, x, {method: v}) : x; }); }); },
+                        style: { background: "#1e293b", border: "1px solid #374151", borderRadius: 6, color: "#e2e8f0", fontSize: 12, padding: "2px 4px" }
+                      },
+                        React.createElement("option", { value: "blur" }, "🌀 Blur"),
+                        React.createElement("option", { value: "black" }, "⬛ Black"),
+                        React.createElement("option", { value: "color" }, "🎨 Color")
+                      ),
+                      r.method === "color" && React.createElement("input", { type: "color", value: r.color || "#000000", onChange: function(e) { var v = e.target.value; setWmRegions(function(prev) { return prev.map(function(x, j) { return j === i ? Object.assign({}, x, {color: v}) : x; }); }); }, style: { width: 28, height: 28, padding: 2, border: "1px solid #374151", borderRadius: 4, background: "none", cursor: "pointer" } }),
+                      React.createElement("button", {
+                        onClick: function() { setWmRegions(function(prev) { return prev.filter(function(_, j) { return j !== i; }); }); },
+                        style: Object.assign({}, btn("#7f1d1d33"), { color: "#ef4444", fontSize: 12, padding: "4px 8px", border: "1px solid #7f1d1d" })
+                      }, "× Remove")
+                    );
+                  })
+                ),
+                React.createElement("div", { style: { display: "flex", gap: 8 } },
+                  React.createElement("button", { onClick: function() { setWmStep(1); }, style: btn("#1e293b") }, "← Recapture"),
+                  React.createElement("button", {
+                    onClick: function() { setWmStep(3); },
+                    disabled: wmRegions.length === 0,
+                    style: Object.assign({}, btn("#6366f1"), { color: "#fff", fontWeight: 700, flex: 1, opacity: wmRegions.length === 0 ? 0.5 : 1 })
+                  }, wmRegions.length === 0 ? "Draw at least one region →" : "Confirm " + wmRegions.length + " region" + (wmRegions.length > 1 ? "s" : "") + " →")
+                )
+              ),
+
+              // ── STEP 3: Confirm ──
+              wmStep === 3 && React.createElement("div", null,
+                React.createElement("div", { style: { background: "#0a2e0a", border: "1px solid #10b981", borderRadius: 8, padding: "10px 14px", color: "#6ee7b7", fontSize: 13, marginBottom: 12 } },
+                  "✓ " + wmRegions.length + " watermark region" + (wmRegions.length > 1 ? "s" : "") + " will be removed from every output clip."
+                ),
+                wmFrame && React.createElement("div", { style: { position: "relative", marginBottom: 12, borderRadius: 8, overflow: "hidden" } },
+                  React.createElement("img", { src: API + wmFrame.frame_url, style: { width: "100%", display: "block" } }),
+                  wmRegions.map(function(r, i) {
+                    var fw = wmFrame.frame_width, fh = wmFrame.frame_height;
+                    return React.createElement("div", { key: r.id, style: { position: "absolute", left: (r.x / fw * 100) + "%", top: (r.y / fh * 100) + "%", width: (r.w / fw * 100) + "%", height: (r.h / fh * 100) + "%", border: "2px solid #ef4444", background: "rgba(239,68,68,0.2)" } },
+                      React.createElement("span", { style: { position: "absolute", top: 0, left: 0, background: "#ef4444", color: "#fff", fontSize: 10, fontWeight: 700, padding: "0 4px" } }, i + 1)
+                    );
+                  })
+                ),
+                wmRegions.map(function(r, i) {
+                  return React.createElement("p", { key: r.id, style: { margin: "0 0 4px", fontSize: 13, color: "#94a3b8" } },
+                    "Region " + (i + 1) + " — " + (r.method === "blur" ? "Blur" : r.method === "black" ? "Black box" : "Color " + r.color)
+                  );
+                }),
+                React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 12 } },
+                  React.createElement("button", { onClick: function() { setWmStep(2); }, style: btn("#1e293b") }, "← Edit regions"),
+                  React.createElement("p", { style: { margin: 0, flex: 1, fontSize: 12, color: "#475569", alignSelf: "center" } }, "Regions apply to all clips. Click Process → when ready.")
+                )
+              )
+            )
+        ),
+
+        // ── Template layout section — toggle card ──
+        !job && React.createElement("div", null,
 
             // Toggle header card
             React.createElement("div", { style: Object.assign({}, card, { marginBottom: tmplEnabled ? 0 : 16 }) },
@@ -1002,10 +1447,10 @@ function ClipForge() {
               )
             )
             ) // end tmplEnabled
-          ),
+        ),
 
-          // Non-template clip settings
-          mode !== "template" && React.createElement("div", { style: card },
+        // Non-template clip settings (when template section is off and portrait mode)
+        !job && !tmplEnabled && outFmt !== "landscape" && React.createElement("div", { style: card },
             React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 } },
               React.createElement("div", null,
                 React.createElement("p", { style: lbl }, "Clips: " + num),
@@ -1020,271 +1465,6 @@ function ClipForge() {
                 React.createElement("input", { type: "range", min: 30, max: 300, step: 15, value: maxD, onChange: function(e) { setMaxD(+e.target.value); }, style: slider })
               )
             )
-          ),
-
-          // ── Watermark removal — 3-step flow ──
-          React.createElement("div", { style: card },
-            // Header row: title + toggle
-            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: wmEnabled ? 20 : 0 } },
-              React.createElement("div", null,
-                React.createElement("p", { style: Object.assign({}, lbl, { marginBottom: 2 }) }, "🎯 Remove Watermarks / Logos"),
-                React.createElement("p", { style: { margin: 0, fontSize: 12, color: "#475569" } }, "Frame capture + draw regions · multi-logo support")
-              ),
-              React.createElement("div", {
-                onClick: function() { setWmEnabled(!wmEnabled); if (wmEnabled) { setWmStep(1); setWmFrame(null); setWmRegions([]); } },
-                style: { width: 44, height: 24, borderRadius: 12, cursor: "pointer", background: wmEnabled ? "#6366f1" : "#374151", position: "relative", transition: "background 0.2s", flexShrink: 0 }
-              },
-                React.createElement("div", { style: { position: "absolute", top: 3, left: wmEnabled ? 23 : 3, width: 18, height: 18, borderRadius: "50%", background: "#fff", transition: "left 0.2s" } })
-              )
-            ),
-
-            wmEnabled && React.createElement("div", null,
-
-              // Step indicator
-              React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 16 } },
-                ["1 Capture", "2 Mark", "3 Confirm"].map(function(label, i) {
-                  var active = wmStep === i + 1;
-                  return React.createElement("div", { key: i, style: { flex: 1, textAlign: "center", padding: "6px 0", borderRadius: 8, fontSize: 12, fontWeight: 600, background: active ? "#6366f122" : "#0f172a", color: active ? "#a5b4fc" : "#475569", border: active ? "1px solid #6366f1" : "1px solid #1e293b" } }, label);
-                })
-              ),
-
-              // ── STEP 1: Capture frame ──
-              wmStep === 1 && React.createElement("div", null,
-                React.createElement("p", { style: { margin: "0 0 8px", fontSize: 13, color: "#94a3b8" } }, "Enter a timestamp where the watermark is visible, then capture."),
-                React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 10 } },
-                  React.createElement("input", { value: wmTs, onChange: function(e) { setWmTs(e.target.value); }, placeholder: "00:00:05", style: Object.assign({}, inp, { flex: 1, marginBottom: 0 }) }),
-                  React.createElement("button", {
-                    onClick: captureFrame,
-                    disabled: wmCapturing,
-                    style: Object.assign({}, btn("#6366f1"), { color: "#fff", fontWeight: 700, opacity: wmCapturing ? 0.6 : 1 })
-                  }, wmCapturing ? "⏳ Loading..." : "📸 Capture")
-                ),
-                React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 } },
-                  [["2s", "2"], ["10s", "10"], ["1min", "60"], ["5min", "300"], ["10min", "600"]].map(function(p) {
-                    return React.createElement("button", { key: p[0], onClick: function() { setWmTs(p[1]); }, style: Object.assign({}, btn("#0f172a"), { fontSize: 11, padding: "4px 10px" }) }, p[0]);
-                  })
-                ),
-                React.createElement("div", { style: { background: "#0f172a", borderRadius: 10, height: 120, display: "flex", alignItems: "center", justifyContent: "center", color: "#475569", fontSize: 13 } },
-                  "🎬 Enter timestamp and click Capture · Logos appear at 2–5s"
-                )
-              ),
-
-              // ── STEP 2: Mark regions ──
-              wmStep === 2 && wmFrame && React.createElement("div", null,
-                React.createElement("p", { style: { margin: "0 0 8px", fontSize: 13, color: "#94a3b8" } }, "Click and drag to draw a box over each logo. Draw as many as needed."),
-                // Frame + canvas overlay
-                React.createElement("div", { style: { position: "relative", marginBottom: 12, borderRadius: 8, overflow: "hidden", cursor: "crosshair" } },
-                  React.createElement("img", { src: API + wmFrame.frame_url, style: { width: "100%", display: "block" }, draggable: false }),
-                  React.createElement("canvas", { ref: canvasRef, style: { position: "absolute", inset: 0, width: "100%", height: "100%" } })
-                ),
-                // Region list
-                wmRegions.length > 0 && React.createElement("div", { style: { marginBottom: 12 } },
-                  React.createElement("p", { style: lbl }, "Marked regions"),
-                  wmRegions.map(function(r, i) {
-                    return React.createElement("div", { key: r.id, style: { display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", background: "#0f172a", borderRadius: 8, marginBottom: 6 } },
-                      React.createElement("span", { style: { background: "#ef4444", color: "#fff", borderRadius: 4, width: 20, height: 20, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, flexShrink: 0 } }, i + 1),
-                      React.createElement("span", { style: { fontSize: 12, color: "#94a3b8", flex: 1 } }, "x:" + Math.round(r.x) + " y:" + Math.round(r.y) + " · " + Math.round(r.w) + "×" + Math.round(r.h) + "px"),
-                      React.createElement("select", {
-                        value: r.method,
-                        onChange: function(e) { var v = e.target.value; setWmRegions(function(prev) { return prev.map(function(x, j) { return j === i ? Object.assign({}, x, {method: v}) : x; }); }); },
-                        style: { background: "#1e293b", border: "1px solid #374151", borderRadius: 6, color: "#e2e8f0", fontSize: 12, padding: "2px 4px" }
-                      },
-                        React.createElement("option", { value: "blur" }, "🌀 Blur"),
-                        React.createElement("option", { value: "black" }, "⬛ Black"),
-                        React.createElement("option", { value: "color" }, "🎨 Color")
-                      ),
-                      r.method === "color" && React.createElement("input", { type: "color", value: r.color || "#000000", onChange: function(e) { var v = e.target.value; setWmRegions(function(prev) { return prev.map(function(x, j) { return j === i ? Object.assign({}, x, {color: v}) : x; }); }); }, style: { width: 28, height: 28, padding: 2, border: "1px solid #374151", borderRadius: 4, background: "none", cursor: "pointer" } }),
-                      React.createElement("button", {
-                        onClick: function() { setWmRegions(function(prev) { return prev.filter(function(_, j) { return j !== i; }); }); },
-                        style: Object.assign({}, btn("#7f1d1d33"), { color: "#ef4444", fontSize: 12, padding: "4px 8px", border: "1px solid #7f1d1d" })
-                      }, "× Remove")
-                    );
-                  })
-                ),
-                React.createElement("div", { style: { display: "flex", gap: 8 } },
-                  React.createElement("button", { onClick: function() { setWmStep(1); }, style: btn("#1e293b") }, "← Recapture"),
-                  React.createElement("button", {
-                    onClick: function() { setWmStep(3); },
-                    disabled: wmRegions.length === 0,
-                    style: Object.assign({}, btn("#6366f1"), { color: "#fff", fontWeight: 700, flex: 1, opacity: wmRegions.length === 0 ? 0.5 : 1 })
-                  }, wmRegions.length === 0 ? "Draw at least one region →" : "Confirm " + wmRegions.length + " region" + (wmRegions.length > 1 ? "s" : "") + " →")
-                )
-              ),
-
-              // ── STEP 3: Confirm ──
-              wmStep === 3 && React.createElement("div", null,
-                React.createElement("div", { style: { background: "#0a2e0a", border: "1px solid #10b981", borderRadius: 8, padding: "10px 14px", color: "#6ee7b7", fontSize: 13, marginBottom: 12 } },
-                  "✓ " + wmRegions.length + " watermark region" + (wmRegions.length > 1 ? "s" : "") + " will be removed from every output clip."
-                ),
-                wmFrame && React.createElement("div", { style: { position: "relative", marginBottom: 12, borderRadius: 8, overflow: "hidden" } },
-                  React.createElement("img", { src: API + wmFrame.frame_url, style: { width: "100%", display: "block" } }),
-                  wmRegions.map(function(r, i) {
-                    var fw = wmFrame.frame_width, fh = wmFrame.frame_height;
-                    return React.createElement("div", { key: r.id, style: { position: "absolute", left: (r.x / fw * 100) + "%", top: (r.y / fh * 100) + "%", width: (r.w / fw * 100) + "%", height: (r.h / fh * 100) + "%", border: "2px solid #ef4444", background: "rgba(239,68,68,0.2)" } },
-                      React.createElement("span", { style: { position: "absolute", top: 0, left: 0, background: "#ef4444", color: "#fff", fontSize: 10, fontWeight: 700, padding: "0 4px" } }, i + 1)
-                    );
-                  })
-                ),
-                wmRegions.map(function(r, i) {
-                  return React.createElement("p", { key: r.id, style: { margin: "0 0 4px", fontSize: 13, color: "#94a3b8" } },
-                    "Region " + (i + 1) + " — " + (r.method === "blur" ? "Blur" : r.method === "black" ? "Black box" : "Color " + r.color)
-                  );
-                }),
-                React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 12 } },
-                  React.createElement("button", { onClick: function() { setWmStep(2); }, style: btn("#1e293b") }, "← Edit regions"),
-                  React.createElement("p", { style: { margin: 0, flex: 1, fontSize: 12, color: "#475569", alignSelf: "center" } }, "Regions apply to all clips. Click Process → when ready.")
-                )
-              )
-            )
-          )
-        ),
-
-        // ── Cut / Remove Segments card (Addendum 6) ──
-        !job && React.createElement("div", { style: card },
-          React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
-            React.createElement("div", null,
-              React.createElement("p", { style: Object.assign({}, lbl, { marginBottom: 2 }) }, "✂️ Cut / Remove Segments"),
-              React.createElement("p", { style: { margin: 0, fontSize: 12, color: "#475569" } },
-                cutEnabled ? "Define time ranges to remove from the video" : "Toggle on to remove sections from the video"
-              )
-            ),
-            React.createElement("div", {
-              onClick: function() { setCutEnabled(!cutEnabled); },
-              style: { width: 44, height: 24, borderRadius: 12, cursor: "pointer",
-                       background: cutEnabled ? "#6366f1" : "#374151",
-                       position: "relative", transition: "background 0.2s", flexShrink: 0 }
-            },
-              React.createElement("div", {
-                style: { position: "absolute", top: 3,
-                         left: cutEnabled ? 23 : 3,
-                         width: 18, height: 18, borderRadius: "50%",
-                         background: "#fff", transition: "left 0.2s" }
-              })
-            )
-          ),
-
-          cutEnabled && React.createElement("div", { style: { marginTop: 16 } },
-
-            // Timeline bar
-            React.createElement("div", { style: { marginBottom: 16 } },
-              React.createElement("p", { style: Object.assign({}, lbl, { marginBottom: 8 }) }, "Timeline preview"),
-              React.createElement("div", { style: { position: "relative", height: 40, background: "#0f172a",
-                                                     border: "1px solid #1e293b", borderRadius: 8, overflow: "hidden" } },
-                (function() {
-                  if (!videoDuration || cutSegments.length === 0) {
-                    return React.createElement("div", { style: { height: "100%", background: "#6366f122",
-                                                                  borderLeft: "2px solid #6366f155",
-                                                                  borderRight: "2px solid #6366f155" } });
-                  }
-                  var dur = videoDuration;
-                  var cuts = cutSegments.map(function(c) {
-                    return { start: parseTs(c.start) / dur * 100, end: parseTs(c.end) / dur * 100 };
-                  }).sort(function(a, b) { return a.start - b.start; });
-                  var blocks = [];
-                  var prev = 0;
-                  cuts.forEach(function(c, i) {
-                    if (c.start > prev) {
-                      blocks.push(React.createElement("div", { key: "k" + i, style: { position: "absolute", left: prev + "%", width: (c.start - prev) + "%", top: 0, bottom: 0, background: "#6366f122", borderRight: "2px solid #6366f155" } }));
-                    }
-                    blocks.push(React.createElement("div", { key: "c" + i, style: { position: "absolute", left: c.start + "%", width: (c.end - c.start) + "%", top: 0, bottom: 0, background: "#ef444422", borderLeft: "2px solid #ef4444", borderRight: "2px solid #ef4444", display: "flex", alignItems: "center", justifyContent: "center" } },
-                      React.createElement("span", { style: { fontSize: 9, color: "#ef4444", fontWeight: 700 } }, "✂ " + (i + 1))
-                    ));
-                    prev = c.end;
-                  });
-                  if (prev < 100) {
-                    blocks.push(React.createElement("div", { key: "klast", style: { position: "absolute", left: prev + "%", width: (100 - prev) + "%", top: 0, bottom: 0, background: "#6366f122", borderLeft: "2px solid #6366f155" } }));
-                  }
-                  return blocks;
-                })()
-              ),
-              React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 10, color: "#475569", marginTop: 4 } },
-                React.createElement("span", null, "0:00"),
-                React.createElement("span", null, videoDuration ? formatDur(videoDuration) : "--:--")
-              )
-            ),
-
-            // Cut rows
-            cutSegments.map(function(seg, i) {
-              var cutDur = parseTs(seg.end) - parseTs(seg.start);
-              return React.createElement("div", { key: seg.id,
-                style: { display: "flex", alignItems: "center", gap: 8, padding: "10px 12px",
-                         background: "#0f172a", border: "1px solid #1e293b",
-                         borderRadius: 8, marginBottom: 6 } },
-                React.createElement("div", { style: { width: 20, height: 20, borderRadius: "50%",
-                                                       background: "#ef444422", border: "1px solid #ef444444",
-                                                       color: "#ef4444", fontSize: 10, fontWeight: 700,
-                                                       display: "flex", alignItems: "center", justifyContent: "center",
-                                                       flexShrink: 0 } }, i + 1),
-                React.createElement("span", { style: { fontSize: 12, color: "#64748b" } }, "Remove from"),
-                React.createElement("input", {
-                  value: seg.start,
-                  onChange: function(e) { updateCutSegment(seg.id, "start", e.target.value); },
-                  placeholder: "00:00",
-                  style: { background: "#0d1117", border: "1px solid #374151", borderRadius: 6,
-                           padding: "5px 8px", color: "#e2e8f0", fontSize: 12,
-                           fontFamily: "monospace", width: 72, outline: "none", textAlign: "center" }
-                }),
-                React.createElement("span", { style: { fontSize: 12, color: "#64748b" } }, "to"),
-                React.createElement("input", {
-                  value: seg.end,
-                  onChange: function(e) { updateCutSegment(seg.id, "end", e.target.value); },
-                  placeholder: "00:30",
-                  style: { background: "#0d1117", border: "1px solid #374151", borderRadius: 6,
-                           padding: "5px 8px", color: "#e2e8f0", fontSize: 12,
-                           fontFamily: "monospace", width: 72, outline: "none", textAlign: "center" }
-                }),
-                cutDur > 0 && React.createElement("span", { style: { fontSize: 11, color: "#ef4444",
-                                                                       background: "#ef444411",
-                                                                       borderRadius: 4, padding: "2px 7px",
-                                                                       fontWeight: 600 } }, "-" + formatDur(cutDur)),
-                React.createElement("button", {
-                  onClick: function() { removeCutSegment(seg.id); },
-                  style: { padding: "4px 8px", background: "#7f1d1d22", border: "1px solid #7f1d1d",
-                           borderRadius: 6, color: "#ef4444", fontSize: 11, cursor: "pointer" }
-                }, "× Remove")
-              );
-            }),
-
-            // Add cut button
-            React.createElement("button", {
-              onClick: addCutSegment,
-              style: { display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-                       padding: "9px 16px", background: "transparent",
-                       border: "1px dashed #374151", borderRadius: 8,
-                       color: "#475569", fontSize: 12, cursor: "pointer", width: "100%",
-                       marginBottom: 12 }
-            }, "✂️ + Add another cut"),
-
-            // Summary row
-            (function() {
-              var totalCut = cutSegments.reduce(function(sum, seg) {
-                return sum + Math.max(0, parseTs(seg.end) - parseTs(seg.start));
-              }, 0);
-              var finalDur = Math.max(0, (videoDuration || 0) - totalCut);
-              return React.createElement("div", { style: { background: "#0f172a", border: "1px solid #1e293b",
-                                                             borderRadius: 8, padding: "12px 16px",
-                                                             display: "flex", gap: 16, alignItems: "center",
-                                                             justifyContent: "center" } },
-                React.createElement("div", { style: { textAlign: "center" } },
-                  React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: "#e2e8f0" } },
-                    videoDuration ? formatDur(videoDuration) : "--:--"),
-                  React.createElement("div", { style: { fontSize: 10, color: "#475569", marginTop: 2 } }, "Original")
-                ),
-                React.createElement("span", { style: { color: "#475569", fontSize: 16 } }, "→"),
-                React.createElement("div", { style: { textAlign: "center" } },
-                  React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: "#ef4444" } },
-                    totalCut > 0 ? "-" + formatDur(totalCut) : "0:00"),
-                  React.createElement("div", { style: { fontSize: 10, color: "#475569", marginTop: 2 } }, "Removed")
-                ),
-                React.createElement("span", { style: { color: "#475569", fontSize: 16 } }, "="),
-                React.createElement("div", { style: { textAlign: "center" } },
-                  React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: "#10b981" } },
-                    finalDur > 0 ? formatDur(finalDur) : "--:--"),
-                  React.createElement("div", { style: { fontSize: 10, color: "#475569", marginTop: 2 } }, "Final")
-                )
-              );
-            })()
-          )
         ),
 
         // Job in progress

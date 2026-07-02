@@ -51,6 +51,15 @@ class ProcessRequest(BaseModel):
     # Cut / remove segments (Addendum 6)
     cut_enabled: Optional[bool] = False
     cut_segments: Optional[List[dict]] = None         # [{start, end}, ...]
+    # Voice & Audio (Addendum 7)
+    voice_enabled: Optional[bool] = False
+    voice_mode: Optional[str] = None                  # "remove" | "music" | "ai"
+    music_category: Optional[str] = "gaming"
+    music_volume: Optional[float] = 0.8
+    original_volume: Optional[float] = 0.2
+    ai_voice_id: Optional[str] = None                 # ElevenLabs voice ID
+    pitch_shift_enabled: Optional[bool] = False
+    speed_adjust_enabled: Optional[bool] = False
 
 
 class FrameRequest(BaseModel):
@@ -120,6 +129,27 @@ async def upload_background(category: str = "custom", file: UploadFile = File(..
         "url": f"/backgrounds/{category}/{safe_name}",
         "category": category,
     }
+
+
+# ──────────────────────────────────────────────────────────────
+# Music categories endpoint (Addendum 7)
+# ──────────────────────────────────────────────────────────────
+
+@app.get("/api/music-categories")
+def get_music_categories():
+    """Return available music categories and track counts."""
+    music_dir = "music"
+    categories = []
+    for cat in ["gaming", "motivational", "chill", "news", "sports", "cinematic"]:
+        cat_path = os.path.join(music_dir, cat)
+        count = 0
+        if os.path.exists(cat_path):
+            count = len([
+                f for f in os.listdir(cat_path)
+                if f.endswith((".mp3", ".wav", ".m4a", ".ogg"))
+            ])
+        categories.append({"id": cat, "count": count})
+    return {"categories": categories}
 
 
 # ──────────────────────────────────────────────────────────────
@@ -658,6 +688,80 @@ async def pipeline(job_id, req):
                         clip["caption"] = kw.get("tiktok_description", title)
                     apply_wm(clip["path"].lstrip("/"), src_w, src_h)
                 logger.info(f"[{job_id}] ROUTE D complete: {len(outputs)} clips")
+
+        # ── VOICE & AUDIO — runs after watermark, applied to every output file ──
+        if req.voice_enabled and req.voice_mode and outputs:
+            from backend.services.voice_processor import remove_voice, add_music, replace_with_ai_voice
+            up("processing", 95, f"Applying voice processing ({req.voice_mode})...")
+            for clip in outputs:
+                clip_path = clip["path"].lstrip("/")
+                if not os.path.exists(clip_path):
+                    logger.warning(f"[{job_id}] Voice: clip not found: {clip_path}")
+                    continue
+                voice_out = clip_path.replace(".mp4", "_voice.mp4")
+                ok = False
+
+                if req.voice_mode == "remove":
+                    ok = remove_voice(clip_path, voice_out)
+
+                elif req.voice_mode == "music":
+                    ok = add_music(
+                        clip_path, voice_out,
+                        category=req.music_category or "gaming",
+                        music_volume=float(req.music_volume or 0.8),
+                        original_volume=float(req.original_volume or 0.2),
+                    )
+
+                elif req.voice_mode == "ai":
+                    if req.elevenlabs_api_key and req.ai_voice_id:
+                        transcript = clip.get("caption", clip.get("title", ""))
+                        ok = replace_with_ai_voice(
+                            clip_path, voice_out,
+                            transcript=transcript,
+                            voice_id=req.ai_voice_id,
+                            elevenlabs_api_key=req.elevenlabs_api_key,
+                            original_volume=0.0,
+                        )
+                    else:
+                        logger.warning(f"[{job_id}] AI voice requires elevenlabs_api_key and ai_voice_id")
+
+                if ok and os.path.exists(voice_out):
+                    os.replace(voice_out, clip_path)
+                    logger.info(f"[{job_id}] Voice processed ({req.voice_mode}): {clip_path}")
+                else:
+                    logger.warning(f"[{job_id}] Voice processing failed for {clip_path}, keeping original")
+
+        # ── PITCH SHIFT — after voice processing ──
+        if req.pitch_shift_enabled and outputs:
+            from backend.services.voice_processor import pitch_shift
+            up("processing", 96, "Applying pitch shift...")
+            for clip in outputs:
+                clip_path = clip["path"].lstrip("/")
+                if not os.path.exists(clip_path):
+                    continue
+                ps_out = clip_path.replace(".mp4", "_ps.mp4")
+                ok = pitch_shift(clip_path, ps_out, semitones=2.0)
+                if ok and os.path.exists(ps_out):
+                    os.replace(ps_out, clip_path)
+                    logger.info(f"[{job_id}] Pitch shifted: {clip_path}")
+                else:
+                    logger.warning(f"[{job_id}] Pitch shift failed for {clip_path}, keeping original")
+
+        # ── SPEED ADJUST — after pitch shift ──
+        if req.speed_adjust_enabled and outputs:
+            from backend.services.voice_processor import speed_adjust
+            up("processing", 97, "Applying speed adjustment...")
+            for clip in outputs:
+                clip_path = clip["path"].lstrip("/")
+                if not os.path.exists(clip_path):
+                    continue
+                sa_out = clip_path.replace(".mp4", "_sa.mp4")
+                ok = speed_adjust(clip_path, sa_out, speed=1.02)
+                if ok and os.path.exists(sa_out):
+                    os.replace(sa_out, clip_path)
+                    logger.info(f"[{job_id}] Speed adjusted: {clip_path}")
+                else:
+                    logger.warning(f"[{job_id}] Speed adjust failed for {clip_path}, keeping original")
 
         logger.info(f"[{job_id}] Final outputs keywords check: "
                     f"{outputs[0].get('primary_keywords', 'MISSING') if outputs else 'NO OUTPUTS'}")
