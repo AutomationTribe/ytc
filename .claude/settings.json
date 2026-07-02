@@ -21,7 +21,9 @@
       "Bash(python -c \"import ast; ast.parse\\(open\\('backend/main.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
       "Bash(brew install *)",
       "Read(//usr/local/bin/**)",
-      "Bash(/usr/local/bin/node --version)"
+      "Bash(/usr/local/bin/node --version)",
+      "Bash(node -e \"var fs=require\\('fs'\\); var src=fs.readFileSync\\('frontend/src/App.jsx','utf8'\\); var open=\\(src.match\\(/\\\\\\(/g\\)||[]\\).length; var close=\\(src.match\\(/\\\\\\)/g\\)||[]\\).length; console.log\\('parens balance:', open-close\\);\")",
+      "Bash(python -m py_compile backend/main.py)"
     ]
   }
 }

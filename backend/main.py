@@ -24,7 +24,8 @@ app.mount("/backgrounds", StaticFiles(directory="backgrounds"), name="background
 
 
 class ProcessRequest(BaseModel):
-    youtube_url: str
+    youtube_url: Optional[str] = None
+    uploaded_video_id: Optional[str] = None  # pre-uploaded local file
     mode: str = "shorts"
     template_id: Optional[str] = None
     num_shorts: int = 3
@@ -118,6 +119,39 @@ async def upload_background(category: str = "custom", file: UploadFile = File(..
         "name": os.path.splitext(file.filename)[0],
         "url": f"/backgrounds/{category}/{safe_name}",
         "category": category,
+    }
+
+
+# ──────────────────────────────────────────────────────────────
+# Local video upload endpoint
+# ──────────────────────────────────────────────────────────────
+
+@app.post("/api/upload-video")
+async def upload_video(file: UploadFile = File(...)):
+    """Accept a local video file upload. Saves to downloads/{video_id}/video.mp4."""
+    allowed = {".mp4", ".mov", ".webm", ".avi", ".mkv"}
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in allowed:
+        raise HTTPException(400, f"File type '{ext}' not supported. Allowed: {sorted(allowed)}")
+
+    video_id = str(uuid.uuid4())[:8]
+    out_dir = os.path.join("downloads", video_id)
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "video.mp4")
+
+    with open(out_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    size_mb = os.path.getsize(out_path) / 1024 / 1024
+    title = os.path.splitext(file.filename or "video")[0]
+    logger.info(f"[upload] {title} → {out_path} ({size_mb:.1f}MB)")
+
+    return {
+        "video_id": video_id,
+        "video_path": out_path,
+        "filename": file.filename,
+        "size_mb": round(size_mb, 1),
+        "title": title,
     }
 
 
@@ -262,6 +296,8 @@ def capture_frame(req: FrameRequest):
 
 @app.post("/api/process")
 async def process_video(req: ProcessRequest, bg: BackgroundTasks):
+    if not req.youtube_url and not req.uploaded_video_id:
+        raise HTTPException(400, "Either youtube_url or uploaded_video_id is required")
     if not req.api_key and req.provider != "ollama":
         raise HTTPException(400, "API key required")
 
@@ -340,11 +376,26 @@ async def pipeline(job_id, req):
 
     try:
         async with _sem:
-            # 1. Download
-            up("downloading", 10, "Downloading video...")
-            from backend.services.downloader import download_video
-            video_path, title = await asyncio.to_thread(download_video, req.youtube_url, job_id)
-            logger.info(f"[{job_id}] Downloaded: {video_path}")
+            # 1. Get video — either use uploaded file or download from YouTube
+            if req.uploaded_video_id:
+                up("processing", 10, "Using uploaded video...")
+                upload_dir = os.path.join("downloads", req.uploaded_video_id)
+                candidates = [
+                    f for f in os.listdir(upload_dir)
+                    if f.lower().endswith((".mp4", ".mov", ".webm", ".avi", ".mkv"))
+                ]
+                if not candidates:
+                    raise FileNotFoundError(f"No video found for upload_id={req.uploaded_video_id}")
+                video_path = os.path.join(upload_dir, candidates[0])
+                title = os.path.splitext(candidates[0])[0]
+                logger.info(f"[{job_id}] Using uploaded video: {video_path}")
+            else:
+                if not req.youtube_url:
+                    raise ValueError("Either youtube_url or uploaded_video_id is required")
+                up("downloading", 10, "Downloading video from YouTube...")
+                from backend.services.downloader import download_video
+                video_path, title = await asyncio.to_thread(download_video, req.youtube_url, job_id)
+                logger.info(f"[{job_id}] Downloaded: {video_path}")
 
             # 1b. Apply cuts if enabled (before transcription / routing)
             if req.cut_enabled and req.cut_segments:

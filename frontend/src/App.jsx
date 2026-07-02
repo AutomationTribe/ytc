@@ -155,6 +155,14 @@ function ClipForge() {
   var _cutSegments = s([]), cutSegments = _cutSegments[0], setCutSegments = _cutSegments[1];
   var _videoDuration = s(0), videoDuration = _videoDuration[0], setVideoDuration = _videoDuration[1];
 
+  // Local video upload
+  var _inputMode = s("youtube"), inputMode = _inputMode[0], setInputMode = _inputMode[1];
+  var _uploadedVideoId = s(null), uploadedVideoId = _uploadedVideoId[0], setUploadedVideoId = _uploadedVideoId[1];
+  var _uploadedFilename = s(""), uploadedFilename = _uploadedFilename[0], setUploadedFilename = _uploadedFilename[1];
+  var _uploadProgress = s(0), uploadProgress = _uploadProgress[0], setUploadProgress = _uploadProgress[1];
+  var _uploadingVideo = s(false), uploadingVideo = _uploadingVideo[0], setUploadingVideo = _uploadingVideo[1];
+  var uploadVideoRef = useRef(null);
+
   var cp = PROVIDERS.find(function(p) { return p.id === prov; }) || PROVIDERS[0];
   var currentTmplDef = TEMPLATE_DEFS.find(function(t) { return t.id === tmpl; }) || TEMPLATE_DEFS[0];
 
@@ -302,12 +310,17 @@ function ClipForge() {
   }, [job && job.status]);
 
   function captureFrame() {
-    if (!url.trim() && !jobId) { setErr("Enter a YouTube URL first"); return; }
+    if (inputMode === "upload" && !uploadedVideoId && !jobId) { setErr("Upload a video first"); return; }
+    if (inputMode === "youtube" && !url.trim() && !jobId) { setErr("Enter a YouTube URL first"); return; }
     setWmCapturing(true);
     fetch(API + "/api/preview-frame", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ youtube_url: url || null, job_id: jobId || null, timestamp: wmTs }),
+      body: JSON.stringify({
+        youtube_url: inputMode === "youtube" ? (url || null) : null,
+        job_id: jobId || (inputMode === "upload" ? uploadedVideoId : null),
+        timestamp: wmTs,
+      }),
     })
     .then(function(r) { return r.json(); })
     .then(function(d) {
@@ -320,7 +333,8 @@ function ClipForge() {
 
   function submit() {
     setErr("");
-    if (!url.trim()) { setErr("Enter a YouTube URL"); return; }
+    if (inputMode === "youtube" && !url.trim()) { setErr("Enter a YouTube URL"); return; }
+    if (inputMode === "upload" && !uploadedVideoId) { setErr("Please upload a video file first"); return; }
     if (!apiKey && prov !== "ollama") { setErr("Add API key in Settings"); return; }
 
     setJob({ status: "queued", progress: 0, message: "Submitting..." });
@@ -328,7 +342,8 @@ function ClipForge() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        youtube_url: url,
+        youtube_url: inputMode === "youtube" ? url : null,
+        uploaded_video_id: inputMode === "upload" ? uploadedVideoId : null,
         mode: mode,
         provider: prov,
         model: model || cp.models[0],
@@ -371,7 +386,11 @@ function ClipForge() {
     .catch(function(e) { setErr(e.message); setJob(null); });
   }
 
-  function reset() { setJob(null); setJobId(null); setUrl(""); setErr(""); clearInterval(pollRef.current); }
+  function reset() {
+    setJob(null); setJobId(null); setUrl(""); setErr("");
+    clearInterval(pollRef.current);
+    setUploadedVideoId(null); setUploadedFilename(""); setUploadProgress(0);
+  }
 
   function handleUpload(e) {
     var file = e.target.files && e.target.files[0];
@@ -395,7 +414,7 @@ function ClipForge() {
   // ── Cut segment helpers — Addendum 6 ──
 
   function fetchDuration() {
-    if (!url.trim()) return;
+    if (inputMode !== "youtube" || !url.trim()) return;
     fetch(API + "/api/video-duration", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -435,6 +454,47 @@ function ClipForge() {
     var h = Math.floor(m / 60);
     if (h > 0) return h + ':' + String(m % 60).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
     return m + ':' + String(s % 60).padStart(2, '0');
+  }
+
+  // ── Local video upload handler ──
+
+  function handleVideoUpload(e) {
+    var file = e.target.files && e.target.files[0];
+    if (!file) return;
+
+    setUploadingVideo(true);
+    setUploadProgress(0);
+    setErr("");
+
+    var formData = new FormData();
+    formData.append("file", file);
+
+    var xhr = new XMLHttpRequest();
+    xhr.upload.onprogress = function(ev) {
+      if (ev.lengthComputable) {
+        setUploadProgress(Math.round(ev.loaded / ev.total * 100));
+      }
+    };
+    xhr.onload = function() {
+      if (xhr.status === 200) {
+        var data = JSON.parse(xhr.responseText);
+        setUploadedVideoId(data.video_id);
+        setUploadedFilename(data.filename);
+        setUploadProgress(100);
+        setUploadingVideo(false);
+      } else {
+        var msg = "Upload failed";
+        try { msg = JSON.parse(xhr.responseText).detail || msg; } catch(ex) {}
+        setErr(msg);
+        setUploadingVideo(false);
+      }
+    };
+    xhr.onerror = function() {
+      setErr("Upload failed — check your connection");
+      setUploadingVideo(false);
+    };
+    xhr.open("POST", API + "/api/upload-video");
+    xhr.send(formData);
   }
 
   // ── Keyword helper functions — Addendum 5 ──
@@ -572,11 +632,77 @@ function ClipForge() {
 
         // Form
         !job && React.createElement("div", null,
-          // URL + submit
+          // URL / Upload + submit
           React.createElement("div", { style: Object.assign({}, card, { marginBottom: 16 }) },
-            React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 20 } },
+
+            // Input mode toggle
+            React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 16 } },
+              React.createElement("button", {
+                onClick: function() { setInputMode("youtube"); },
+                style: Object.assign({}, btn(inputMode === "youtube" ? "#6366f133" : "#0f172a"), {
+                  border: inputMode === "youtube" ? "1px solid #6366f1" : "1px solid #374151",
+                  flex: 1, fontWeight: inputMode === "youtube" ? 700 : 400,
+                  color: inputMode === "youtube" ? "#a78bfa" : "#64748b"
+                })
+              }, "🔗 YouTube URL"),
+              React.createElement("button", {
+                onClick: function() { setInputMode("upload"); },
+                style: Object.assign({}, btn(inputMode === "upload" ? "#6366f133" : "#0f172a"), {
+                  border: inputMode === "upload" ? "1px solid #6366f1" : "1px solid #374151",
+                  flex: 1, fontWeight: inputMode === "upload" ? 700 : 400,
+                  color: inputMode === "upload" ? "#a78bfa" : "#64748b"
+                })
+              }, "📁 Upload Video")
+            ),
+
+            // YouTube URL input
+            inputMode === "youtube" && React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 20 } },
               React.createElement("input", { placeholder: "https://youtube.com/watch?v=...", value: url, onChange: function(e) { setUrl(e.target.value); }, onKeyDown: function(e) { if (e.key === "Enter") { fetchDuration(); submit(); } }, onBlur: fetchDuration, style: Object.assign({}, inp, { flex: 1, marginBottom: 0 }) }),
               React.createElement("button", { onClick: submit, style: Object.assign({}, btn("#6366f1"), { color: "#fff", fontWeight: 700, padding: "12px 24px" }) }, "Process →")
+            ),
+
+            // Upload drop zone
+            inputMode === "upload" && React.createElement("div", { style: { marginBottom: 20 } },
+              React.createElement("div", {
+                onClick: function() { uploadVideoRef.current && uploadVideoRef.current.click(); },
+                style: {
+                  border: uploadedVideoId ? "2px solid #10b981" : "2px dashed #374151",
+                  borderRadius: 10, padding: "24px 16px", textAlign: "center",
+                  cursor: "pointer", background: uploadedVideoId ? "#10b98111" : "#0f172a",
+                  marginBottom: 10, transition: "all .2s"
+                }
+              },
+                uploadingVideo
+                  ? React.createElement("div", null,
+                      React.createElement("p", { style: { color: "#94a3b8", margin: "0 0 8px", fontSize: 14 } }, "⏳ Uploading..."),
+                      React.createElement("div", { style: { background: "#1e293b", borderRadius: 4, height: 6, overflow: "hidden" } },
+                        React.createElement("div", { style: { width: uploadProgress + "%", height: "100%", background: "#6366f1", borderRadius: 4, transition: "width .3s" } })
+                      ),
+                      React.createElement("p", { style: { color: "#475569", fontSize: 12, marginTop: 6 } }, uploadProgress + "% uploaded")
+                    )
+                  : uploadedVideoId
+                    ? React.createElement("div", null,
+                        React.createElement("p", { style: { fontSize: 20, margin: "0 0 6px" } }, "✅"),
+                        React.createElement("p", { style: { color: "#10b981", fontWeight: 700, margin: "0 0 4px", fontSize: 14 } }, uploadedFilename),
+                        React.createElement("p", { style: { color: "#475569", fontSize: 12 } }, "Click to replace")
+                      )
+                    : React.createElement("div", null,
+                        React.createElement("p", { style: { fontSize: 28, margin: "0 0 8px" } }, "📁"),
+                        React.createElement("p", { style: { color: "#94a3b8", margin: "0 0 4px", fontSize: 14, fontWeight: 600 } }, "Click to upload video"),
+                        React.createElement("p", { style: { color: "#475569", fontSize: 12 } }, "MP4, MOV, WebM, AVI, MKV · Max 2GB")
+                      )
+              ),
+              React.createElement("input", {
+                ref: uploadVideoRef,
+                type: "file",
+                accept: ".mp4,.mov,.webm,.avi,.mkv",
+                style: { display: "none" },
+                onChange: handleVideoUpload
+              }),
+              uploadedVideoId && React.createElement("button", {
+                onClick: submit,
+                style: Object.assign({}, btn("#6366f1"), { color: "#fff", fontWeight: 700, width: "100%", padding: "12px" })
+              }, "Process →")
             ),
 
             err && React.createElement("div", { style: { background: "#7f1d1d33", border: "1px solid #ef444455", borderRadius: 8, padding: "10px 14px", color: "#fca5a5", fontSize: 13, marginBottom: 16 } }, "⚠️ " + err),
